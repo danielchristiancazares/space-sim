@@ -978,7 +978,7 @@ fn pressure_correction_step(
     let mut pressure_correction_temp = vec![0.0; cell_count];
 
     for _iter in 0..constants::POISSON_MAX_ITERATIONS {
-        let mut max_change = 0.0;
+        let mut max_change: f32 = 0.0;
 
         for y in 0..atmosphere.height {
             for x in 0..atmosphere.width {
@@ -1195,7 +1195,7 @@ fn monitor_divergence(
     }
 
     let dx = atmosphere.tile_size_physical;
-    let mut max_divergence = 0.0;
+    let mut max_divergence: f32 = 0.0;
     let mut total_divergence = 0.0;
     let mut cell_count = 0;
 
@@ -1675,7 +1675,7 @@ mod tests {
         let dx = 1.0; // 1m tile
         let dt = 0.01; // 10ms timestep
         let conductance = constants::PRESSURE_FLUX_CONDUCTANCE;
-        let cell_volume = dx * dx * constants::ROOM_HEIGHT;
+        let _cell_volume = dx * dx * constants::ROOM_HEIGHT;
 
         let p_diff = cell_a.pressure - cell_b.pressure; // Negative (B > A)
         let total_flux = conductance * p_diff * dx * dt;
@@ -1737,7 +1737,7 @@ mod tests {
         let dx = 1.0;
         let dt = 0.01;
         let conductance = constants::PRESSURE_FLUX_CONDUCTANCE;
-        let cell_volume = dx * dx * constants::ROOM_HEIGHT;
+        let _cell_volume = dx * dx * constants::ROOM_HEIGHT;
 
         let p_diff = cell_a.pressure - cell_b.pressure; // Negative
         let total_flux = conductance * p_diff * dx * dt;
