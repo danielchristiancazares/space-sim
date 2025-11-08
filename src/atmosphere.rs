@@ -533,7 +533,8 @@ fn advection_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollision
             let corrected_rho_co2 = forward.rho_co2 + 0.5 * (original.rho_co2 - backward.rho_co2);
             let corrected_u = forward.u + 0.5 * (original.u - backward.u);
             let corrected_v = forward.v + 0.5 * (original.v - backward.v);
-            let corrected_temp = forward.temperature + 0.5 * (original.temperature - backward.temperature);
+            let corrected_temp =
+                forward.temperature + 0.5 * (original.temperature - backward.temperature);
 
             // Clamp to prevent negative densities and maintain physical bounds
             atmosphere.cells[idx].rho_o2 = corrected_rho_o2.max(0.0);
@@ -747,11 +748,7 @@ fn get_or_boundary(
 
 /// Pressure-driven mass flux - gases flow from high to low pressure
 /// This creates bulk flow naturally even from vacuum, handling expansion and back pressure
-fn pressure_flux_step(
-    atmosphere: &mut AtmosphereGrid,
-    collision_map: &TileCollisionMap,
-    dt: f32,
-) {
+fn pressure_flux_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
     let dx = atmosphere.tile_size_physical;
     let conductance = constants::PRESSURE_FLUX_CONDUCTANCE;
 
@@ -793,9 +790,12 @@ fn pressure_flux_step(
 
                     // Distribute flux among gases proportional to donor's partial pressures
                     if donor.pressure > f32::EPSILON {
-                        let p_o2 = (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
-                        let p_n2 = (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
-                        let p_co2 = (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
+                        let p_o2 =
+                            (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
+                        let p_n2 =
+                            (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
+                        let p_co2 =
+                            (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
 
                         // Use absolute value of flux for species decomposition
                         let abs_flux = total_flux.abs();
@@ -821,18 +821,19 @@ fn pressure_flux_step(
                         // Transfer momentum: flowing mass carries donor's velocity
                         // When mass dm flows from donor, it carries momentum dm * u_donor
                         let mass_flux_abs = abs_flux; // kg
-                        let donor_rho = donor.total_density().max(1e-6);
+                        let donor_rho = atmosphere.cells[donor_idx].total_density().max(1e-6);
                         let donor_velocity_u = donor.u;
 
-                        let receiver_cell = &atmosphere.cells_buffer[receiver_idx];
-                        let receiver_rho = receiver_cell.total_density().max(1e-6);
+                        let receiver_rho = atmosphere.cells[receiver_idx].total_density().max(1e-6);
 
                         // Momentum flux in x-direction (mass carries donor's x-velocity)
                         let momentum_flux_u = mass_flux_abs * donor_velocity_u;
 
                         // Update velocities: donor loses momentum, receiver gains it
-                        atmosphere.cells[donor_idx].u -= momentum_flux_u / (donor_rho * cell_volume);
-                        atmosphere.cells[receiver_idx].u += momentum_flux_u / (receiver_rho * cell_volume);
+                        atmosphere.cells[donor_idx].u -=
+                            momentum_flux_u / (donor_rho * cell_volume);
+                        atmosphere.cells[receiver_idx].u +=
+                            momentum_flux_u / (receiver_rho * cell_volume);
                     }
                 }
             }
@@ -859,9 +860,12 @@ fn pressure_flux_step(
 
                     // Distribute flux among gases proportional to donor's partial pressures
                     if donor.pressure > f32::EPSILON {
-                        let p_o2 = (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
-                        let p_n2 = (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
-                        let p_co2 = (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
+                        let p_o2 =
+                            (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
+                        let p_n2 =
+                            (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
+                        let p_co2 =
+                            (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
 
                         // Use absolute value of flux for species decomposition
                         let abs_flux = total_flux.abs();
@@ -886,18 +890,19 @@ fn pressure_flux_step(
                         // Transfer momentum: flowing mass carries donor's velocity
                         // When mass dm flows from donor, it carries momentum dm * v_donor
                         let mass_flux_abs = abs_flux; // kg
-                        let donor_rho = donor.total_density().max(1e-6);
+                        let donor_rho = atmosphere.cells[donor_idx].total_density().max(1e-6);
                         let donor_velocity_v = donor.v;
 
-                        let receiver_cell = &atmosphere.cells_buffer[receiver_idx];
-                        let receiver_rho = receiver_cell.total_density().max(1e-6);
+                        let receiver_rho = atmosphere.cells[receiver_idx].total_density().max(1e-6);
 
                         // Momentum flux in y-direction (mass carries donor's y-velocity)
                         let momentum_flux_v = mass_flux_abs * donor_velocity_v;
 
                         // Update velocities: donor loses momentum, receiver gains it
-                        atmosphere.cells[donor_idx].v -= momentum_flux_v / (donor_rho * cell_volume);
-                        atmosphere.cells[receiver_idx].v += momentum_flux_v / (receiver_rho * cell_volume);
+                        atmosphere.cells[donor_idx].v -=
+                            momentum_flux_v / (donor_rho * cell_volume);
+                        atmosphere.cells[receiver_idx].v +=
+                            momentum_flux_v / (receiver_rho * cell_volume);
                     }
                 }
             }
@@ -1647,7 +1652,7 @@ mod tests {
     fn test_donor_cell_species_conservation() {
         // Create two cells with different gas compositions
         let mut cell_a = AtmosphereCell {
-            rho_o2: 0.273,  // 100% O2 (Earth-like O2 density)
+            rho_o2: 0.273, // 100% O2 (Earth-like O2 density)
             rho_n2: 0.0,
             rho_co2: 0.0,
             u: 0.0,
@@ -1659,7 +1664,7 @@ mod tests {
 
         let mut cell_b = AtmosphereCell {
             rho_o2: 0.0,
-            rho_n2: 1.165,  // 100% N2 (Earth-like N2 density)
+            rho_n2: 1.165, // 100% N2 (Earth-like N2 density)
             rho_co2: 0.0,
             u: 0.0,
             v: 0.0,
@@ -1669,7 +1674,10 @@ mod tests {
         cell_b.update_pressure();
 
         // Cell B has higher pressure, so flow should be FROM B TO A
-        assert!(cell_b.pressure > cell_a.pressure, "B should have higher pressure");
+        assert!(
+            cell_b.pressure > cell_a.pressure,
+            "B should have higher pressure"
+        );
 
         // Simulate pressure-driven flux (simplified version of the actual code)
         let dx = 1.0; // 1m tile
@@ -1697,7 +1705,10 @@ mod tests {
             let flux_n2 = abs_flux * (p_n2 / donor.pressure);
 
             // Since donor has 0% O2, flux_o2 should be zero
-            assert!(flux_o2.abs() < 1e-6, "Should transfer zero O2 from N2-only donor");
+            assert!(
+                flux_o2.abs() < 1e-6,
+                "Should transfer zero O2 from N2-only donor"
+            );
             // Since donor has 100% N2, all flux should be N2
             assert!((flux_n2 - abs_flux).abs() < 1e-3, "Should transfer only N2");
         }
@@ -1712,7 +1723,7 @@ mod tests {
             rho_o2: 0.273,
             rho_n2: 1.165,
             rho_co2: 0.0,
-            u: 0.0,  // Stationary
+            u: 0.0, // Stationary
             v: 0.0,
             temperature: constants::ROOM_TEMP,
             pressure: 0.0,
@@ -1723,15 +1734,18 @@ mod tests {
             rho_o2: 0.273,
             rho_n2: 1.165,
             rho_co2: 0.0,
-            u: 10.0,  // Moving at 10 m/s
+            u: 10.0, // Moving at 10 m/s
             v: 0.0,
-            temperature: constants::ROOM_TEMP * 2.0,  // Higher temp = higher pressure
+            temperature: constants::ROOM_TEMP * 2.0, // Higher temp = higher pressure
             pressure: 0.0,
         };
         cell_b.update_pressure();
 
         // Cell B has higher pressure (due to higher temp), so flow is FROM B TO A
-        assert!(cell_b.pressure > cell_a.pressure, "B should have higher pressure");
+        assert!(
+            cell_b.pressure > cell_a.pressure,
+            "B should have higher pressure"
+        );
 
         // Calculate momentum transfer
         let dx = 1.0;
@@ -1751,12 +1765,21 @@ mod tests {
         let momentum_flux_u = abs_flux * donor_velocity_u;
 
         assert!(donor_velocity_u.abs() > 0.0, "Donor should be moving");
-        assert!(momentum_flux_u.abs() > 0.0, "Momentum flux should be non-zero when donor is moving");
+        assert!(
+            momentum_flux_u.abs() > 0.0,
+            "Momentum flux should be non-zero when donor is moving"
+        );
 
         // If we incorrectly used receiver's velocity, momentum_flux would be zero
         let wrong_momentum_flux = abs_flux * 0.0; // receiver.u = 0.0
-        assert_eq!(wrong_momentum_flux, 0.0, "Wrong approach gives zero momentum transfer");
-        assert_ne!(momentum_flux_u, wrong_momentum_flux, "Correct approach must differ");
+        assert_eq!(
+            wrong_momentum_flux, 0.0,
+            "Wrong approach gives zero momentum transfer"
+        );
+        assert_ne!(
+            momentum_flux_u, wrong_momentum_flux,
+            "Correct approach must differ"
+        );
     }
 
     /// Test that total mass is conserved during pressure flux
@@ -1864,8 +1887,14 @@ mod tests {
         let result = interpolate_cell(&cells, 2, 1, 0.5, 0.0);
 
         // At x=0.5, should interpolate between cells[0] and cells[1]
-        assert!(result.rho_o2 > 0.0 && result.rho_o2 < 1.0, "Should interpolate O2");
-        assert!(result.rho_n2 > 0.0 && result.rho_n2 < 1.0, "Should interpolate N2");
+        assert!(
+            result.rho_o2 > 0.0 && result.rho_o2 < 1.0,
+            "Should interpolate O2"
+        );
+        assert!(
+            result.rho_n2 > 0.0 && result.rho_n2 < 1.0,
+            "Should interpolate N2"
+        );
     }
 
     /// Test that bilinear interpolation works correctly
@@ -1879,7 +1908,10 @@ mod tests {
 
         // Center should be 0.5
         let center = bilerp(v00, v10, v01, v11, 0.5, 0.5);
-        assert!((center - 0.5).abs() < 1e-6, "Center interpolation should be 0.5");
+        assert!(
+            (center - 0.5).abs() < 1e-6,
+            "Center interpolation should be 0.5"
+        );
 
         // Corners should match input
         let corner_00 = bilerp(v00, v10, v01, v11, 0.0, 0.0);

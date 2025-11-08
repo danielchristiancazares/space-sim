@@ -24,7 +24,21 @@
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:docs.claude.com)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(ssh:*)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -v\" git push:*)",
+      "Bash(chmod:*)",
+      "Bash(echo:*)",
+      "Bash(netsh winhttp show proxy:*)",
+      "Bash(timeout 10 bash:*)",
+      "Bash(Get-NetFirewallProfile)",
+      "Bash(Select-Object Name, Enabled)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(Get-Service ssh-agent)",
+      "Bash(Select-Object Status, StartType, DisplayName)",
+      "Bash(powershell.exe -NoProfile -Command \"ssh -T git@github.com\")",
+      "Bash(env)",
+      "Bash(git push)"
     ],
     "deny": []
   }
