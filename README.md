@@ -2,8 +2,6 @@
 
 A 2D fluid dynamics physics simulation built with Bevy 0.15, featuring realistic atmospheric modeling with compressible Navier-Stokes fluid dynamics. The project simulates O₂/N₂/CO₂ gas diffusion, pressure dynamics, player respiration, and life support systems with forced convection on an accelerated timescale. This repository is a simulation testbed rather than a traditional game.
 
-> **Repository status:** No commits have been made yet. This README documents the current simulation capabilities.
-
 ## Feature Overview
 
 ### Atmospheric Physics
@@ -156,7 +154,7 @@ Other modes available in code but not exposed to UI:
 
 ## Design Philosophy
 
-This is a **physics simulation testbed** on an accelerated timescale, not a traditional game. The goal is realistic atmospheric modeling with:
+This is a **physics simulation testbed** on an accelerated timescale. The goal is realistic atmospheric modeling with:
 - Real physical constants (gas laws, diffusion coefficients, human respiration rates)
 - Time compression where needed (gas mixing would take days with pure diffusion)
 - Physically plausible shortcuts (forced convection fans simulate ventilation systems)
