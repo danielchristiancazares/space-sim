@@ -1892,16 +1892,10 @@ mod tests {
     /// Test that pressure is correctly computed from ideal gas law
     #[test]
     fn test_pressure_calculation() {
-        let mut cell = AtmosphereCell {
-            rho_o2: 0.273,  // Earth-like O2 density
-            rho_n2: 1.165,  // Earth-like N2 density
-            rho_co2: 0.0007, // Earth-like CO2 density
-            u: 0.0,
-            v: 0.0,
-            temperature: constants::ROOM_TEMP,
-            pressure: 0.0,
-        };
-
+        // Use canonical Earth atmosphere composition to avoid rounding drift.
+        let mut cell = AtmosphereCell::earth_atmosphere();
+        // Zero the cached pressure so `update_pressure` recomputes it.
+        cell.pressure = 0.0;
         cell.update_pressure();
 
         // Should be approximately Earth pressure (101325 Pa)
