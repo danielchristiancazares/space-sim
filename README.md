@@ -14,7 +14,7 @@ A 2D fluid dynamics physics simulation built with Bevy 0.15, featuring realistic
 - **Life support systems** with forced convection fans creating swirl patterns for gas mixing
 - **Player respiration** consuming O₂ and producing CO₂ at realistic rates
 
-### Gameplay Systems
+### Rendering Engine Systems
 - **8-directional character movement** with normalized diagonal speed and per-axis collision
 - **Smooth camera following** with configurable interpolation
 - **Tile-based collision detection** using decoupled collision map
