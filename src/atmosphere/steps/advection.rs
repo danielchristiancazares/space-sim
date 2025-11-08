@@ -135,11 +135,15 @@ fn bilerp(v00: f32, v10: f32, v01: f32, v11: f32, fx: f32, fy: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tilemap::TileCollisionMap;
 
     #[test]
     fn test_maccormack_differs_from_semi_lagrangian() {
-        // Create a simple velocity field
-        let cells = vec![
+        let mut mac_grid = AtmosphereGrid::new(3, 1, 1.0, 1.0);
+        let mut semi_grid = AtmosphereGrid::new(3, 1, 1.0, 1.0);
+
+        // Create a sharp density gradient that will advect to the right.
+        let setup = [
             AtmosphereCell {
                 rho_o2: 1.0,
                 rho_n2: 0.0,
@@ -147,24 +151,44 @@ mod tests {
                 u: 1.0,
                 v: 0.0,
                 temperature: 300.0,
-                pressure: 101325.0,
+                pressure: 0.0,
             },
             AtmosphereCell {
-                rho_o2: 0.0,
-                rho_n2: 1.0,
+                rho_o2: 0.25,
+                rho_n2: 0.0,
                 rho_co2: 0.0,
                 u: 1.0,
                 v: 0.0,
                 temperature: 300.0,
-                pressure: 101325.0,
+                pressure: 0.0,
+            },
+            AtmosphereCell {
+                rho_o2: 0.0,
+                rho_n2: 0.0,
+                rho_co2: 0.0,
+                u: 1.0,
+                v: 0.0,
+                temperature: 300.0,
+                pressure: 0.0,
             },
         ];
 
-        // Test interpolation (which is used by both schemes)
-        let result = interpolate_cell(&cells, 2, 1, 0.5, 0.0);
+        mac_grid.cells.clone_from_slice(&setup);
+        semi_grid.cells.clone_from_slice(&setup);
 
-        assert!(result.rho_o2 > 0.0 && result.rho_o2 < 1.0);
-        assert!(result.rho_n2 > 0.0 && result.rho_n2 < 1.0);
+        let collision_map = TileCollisionMap::test_map(3, 1);
+        let dt = 0.4;
+
+        advection_step(&mut mac_grid, &collision_map, dt);
+        semi_lagrangian_step(&mut semi_grid, &collision_map, dt);
+
+        let mac_density = mac_grid.cells[1].rho_o2;
+        let semi_density = semi_grid.cells[1].rho_o2;
+
+        assert!(
+            (mac_density - semi_density).abs() > 1e-4,
+            "MacCormack path should differ from semi-Lagrangian reference"
+        );
     }
 
     #[test]
@@ -182,5 +206,35 @@ mod tests {
 
         let corner_11 = bilerp(v00, v10, v01, v11, 1.0, 1.0);
         assert!((corner_11 - v11).abs() < 1e-6);
+    }
+}
+
+/// Minimal semi-Lagrangian integrator used to compare against the MacCormack path.
+#[cfg(test)]
+fn semi_lagrangian_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
+    atmosphere
+        .cells_buffer
+        .clone_from_slice(&atmosphere.cells);
+
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+            let cell = &atmosphere.cells_buffer[idx];
+
+            let x_back = x as f32 - (cell.u * dt) / atmosphere.tile_size_physical;
+            let y_back = y as f32 - (cell.v * dt) / atmosphere.tile_size_physical;
+
+            atmosphere.cells[idx] = interpolate_cell(
+                &atmosphere.cells_buffer,
+                atmosphere.width,
+                atmosphere.height,
+                x_back,
+                y_back,
+            );
+        }
     }
 }

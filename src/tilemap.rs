@@ -65,6 +65,18 @@ impl TileCollisionMap {
             .map(|tile| self.is_blocked(tile.x, tile.y))
             .unwrap_or(true)
     }
+
+    #[cfg(test)]
+    /// Create a test collision map with all tiles unblocked.
+    pub fn test_map(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            origin: Vec2::ZERO,
+            tile_size: Vec2::new(1.0, 1.0),
+            blocked: vec![false; (width * height) as usize],
+        }
+    }
 }
 
 const MAP_JSON: &str = include_str!("../assets/maps/untitled_map.json");

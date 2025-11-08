@@ -41,24 +41,27 @@ pub fn pressure_flux_step(
             }
 
             let idx = atmosphere.index(x, y);
-            let cell = atmosphere.cells_buffer[idx].clone();
+            let cell_pressure = atmosphere.cells_buffer[idx].pressure;
 
             if x < atmosphere.width - 1 && !collision_map.is_blocked(x + 1, y) {
                 let idx_right = atmosphere.index(x + 1, y);
-                let cell_right = atmosphere.cells_buffer[idx_right].clone();
+                let right_pressure = atmosphere.cells_buffer[idx_right].pressure;
 
-                let p_diff = cell.pressure - cell_right.pressure;
+                let p_diff = cell_pressure - right_pressure;
 
                 if p_diff.abs() > f32::EPSILON {
                     let mass_to_transfer = (conductance * p_diff * dx * dt).abs();
 
-                    let (donor_state, donor_idx, receiver_idx) = if p_diff > 0.0 {
-                        (cell.clone(), idx, idx_right)
-                    } else {
-                        (cell_right.clone(), idx_right, idx)
-                    };
-
-                    if donor_state.pressure > f32::EPSILON && mass_to_transfer > 0.0 {
+                    if mass_to_transfer > 0.0 {
+                        let (donor_idx, receiver_idx) = if p_diff > 0.0 {
+                            (idx, idx_right)
+                        } else {
+                            (idx_right, idx)
+                        };
+                        let donor_state = atmosphere.cells_buffer[donor_idx].clone();
+                        if donor_state.pressure <= f32::EPSILON {
+                            continue;
+                        }
                         process_flux(
                             atmosphere,
                             donor_idx,
@@ -74,20 +77,23 @@ pub fn pressure_flux_step(
 
             if y < atmosphere.height - 1 && !collision_map.is_blocked(x, y + 1) {
                 let idx_up = atmosphere.index(x, y + 1);
-                let cell_up = atmosphere.cells_buffer[idx_up].clone();
+                let up_pressure = atmosphere.cells_buffer[idx_up].pressure;
 
-                let p_diff = cell.pressure - cell_up.pressure;
+                let p_diff = cell_pressure - up_pressure;
 
                 if p_diff.abs() > f32::EPSILON {
                     let mass_to_transfer = (conductance * p_diff * dx * dt).abs();
 
-                    let (donor_state, donor_idx, receiver_idx) = if p_diff > 0.0 {
-                        (cell.clone(), idx, idx_up)
-                    } else {
-                        (cell_up.clone(), idx_up, idx)
-                    };
-
-                    if donor_state.pressure > f32::EPSILON && mass_to_transfer > 0.0 {
+                    if mass_to_transfer > 0.0 {
+                        let (donor_idx, receiver_idx) = if p_diff > 0.0 {
+                            (idx, idx_up)
+                        } else {
+                            (idx_up, idx)
+                        };
+                        let donor_state = atmosphere.cells_buffer[donor_idx].clone();
+                        if donor_state.pressure <= f32::EPSILON {
+                            continue;
+                        }
                         process_flux(
                             atmosphere,
                             donor_idx,
@@ -135,8 +141,8 @@ fn process_flux(
     let mut m_n2 = mass_to_transfer * frac_n2;
     let mut m_co2 = mass_to_transfer * frac_co2;
 
-    let donor_before = atmosphere.cells[donor_idx].clone();
-    let receiver_before = atmosphere.cells[receiver_idx].clone();
+    let donor_before = atmosphere.cells_buffer[donor_idx].clone();
+    let receiver_before = atmosphere.cells_buffer[receiver_idx].clone();
     let donor_mass_before = donor_before.total_density() * cell_volume;
     if donor_mass_before <= 0.0 {
         return;
@@ -220,10 +226,10 @@ fn process_flux(
         receiver_velocity_after,
     );
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atmosphere::grid::AtmosphereCell;
 
     #[test]
     fn test_donor_cell_species_conservation() {
