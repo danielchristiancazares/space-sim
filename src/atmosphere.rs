@@ -76,6 +76,25 @@ pub mod constants {
     /// Controls how fast gases flow from high to low pressure
     /// Tuned for realistic expansion into vacuum while maintaining stability
     pub const PRESSURE_FLUX_CONDUCTANCE: f32 = 0.01;
+
+    /// Mass conservation check interval (seconds)
+    /// How often to verify total mass conservation
+    pub const MASS_CHECK_INTERVAL: f32 = 5.0;
+
+    /// Mass conservation tolerance (relative error)
+    /// Warn if mass changes by more than this fraction (excluding life support/respiration)
+    pub const MASS_TOLERANCE: f32 = 0.01; // 1%
+
+    /// CFL number for timestep stability
+    /// CFL = (u*dt)/dx should be < 1 for explicit schemes
+    /// Using 0.5 provides good stability margin
+    pub const CFL_NUMBER: f32 = 0.5;
+
+    /// Poisson solver maximum iterations
+    pub const POISSON_MAX_ITERATIONS: usize = 50;
+
+    /// Poisson solver convergence tolerance
+    pub const POISSON_TOLERANCE: f32 = 1e-4;
 }
 
 /// Atmospheric state for a single grid cell
@@ -196,6 +215,24 @@ pub struct AtmosphereGrid {
     pub cells_buffer: Vec<AtmosphereCell>,
 }
 
+/// Resource for tracking mass conservation
+#[derive(Resource)]
+struct MassTracker {
+    /// Last recorded total mass [kg]
+    last_total_mass: f32,
+    /// Time since last check [s]
+    time_since_check: f32,
+    /// Expected mass change from sources/sinks [kg]
+    expected_delta: f32,
+}
+
+/// Resource for tracking velocity divergence
+#[derive(Resource)]
+struct DivergenceTracker {
+    /// Time since last check [s]
+    time_since_check: f32,
+}
+
 impl AtmosphereGrid {
     pub fn new(width: u32, height: u32, tile_size_world: f32, tile_size_physical: f32) -> Self {
         let cell_count = (width * height) as usize;
@@ -285,6 +322,8 @@ impl Plugin for AtmospherePlugin {
                     player_respiration,
                     update_pressure_from_state,
                     simulate_atmosphere,
+                    check_mass_conservation,
+                    monitor_divergence,
                     debug_visualization,
                 )
                     .chain()
@@ -306,6 +345,18 @@ fn initialize_atmosphere(mut commands: Commands, collision_map: Res<TileCollisio
     grid.initialize_vacuum();
 
     commands.insert_resource(grid);
+
+    // Initialize mass tracker with zero mass (starting in vacuum)
+    commands.insert_resource(MassTracker {
+        last_total_mass: 0.0,
+        time_since_check: 0.0,
+        expected_delta: 0.0,
+    });
+
+    // Initialize divergence tracker
+    commands.insert_resource(DivergenceTracker {
+        time_since_check: 0.0,
+    });
 
     info!(
         "Atmospheric simulation initialized: {}x{} grid (starting in vacuum)",
@@ -349,7 +400,7 @@ fn simulate_atmosphere(
         // CFL = (u*dt)/dx should be < 1
         let max_velocity = compute_max_velocity(&atmosphere);
         let cfl_dt = if max_velocity > 0.0 {
-            0.5 * atmosphere.tile_size_physical / max_velocity
+            constants::CFL_NUMBER * atmosphere.tile_size_physical / max_velocity
         } else {
             remaining
         };
@@ -390,14 +441,33 @@ fn compute_max_velocity(atmosphere: &AtmosphereGrid) -> f32 {
 }
 
 /// Step 1: Advection - transport quantities by velocity field
-/// Uses semi-Lagrangian method for unconditional stability
+///
+/// Uses MacCormack scheme for second-order accuracy with reduced numerical dissipation.
+/// MacCormack is a predictor-corrector method:
+/// 1. Forward step: advect forward in time (predictor)
+/// 2. Backward step: advect backward from predicted state (corrector)
+/// 3. Correction: φ_final = φ_forward + 0.5 * (φ_original - φ_backward)
+///
+/// Benefits over semi-Lagrangian:
+/// - Second-order temporal accuracy (vs. first-order)
+/// - Reduced numerical dissipation (preserves flow structures better)
+/// - Better energy conservation
+///
+/// Note: Can produce small oscillations near sharp gradients; clamping is applied.
 fn advection_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
-    // Copy current state to buffer
+    let cell_count = (atmosphere.width * atmosphere.height) as usize;
+
+    // Allocate temporary storage for MacCormack scheme
+    let mut forward_state = vec![AtmosphereCell::default(); cell_count];
+    let mut backward_state = vec![AtmosphereCell::default(); cell_count];
+
+    // Copy current state to buffer (original state φⁿ)
     atmosphere.cells_buffer.clone_from_slice(&atmosphere.cells);
 
+    // Step 1: Forward advection (predictor)
+    // φ* = φⁿ - dt * (u · ∇φⁿ)
     for y in 0..atmosphere.height {
         for x in 0..atmosphere.width {
-            // Skip wall cells
             if collision_map.is_blocked(x, y) {
                 continue;
             }
@@ -405,26 +475,73 @@ fn advection_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollision
             let idx = atmosphere.index(x, y);
             let cell = &atmosphere.cells_buffer[idx];
 
-            // Semi-Lagrangian: trace particle backward in time
+            // Backward trace from current position
             let x_back = x as f32 - (cell.u * dt) / atmosphere.tile_size_physical;
             let y_back = y as f32 - (cell.v * dt) / atmosphere.tile_size_physical;
 
-            // Bilinear interpolation
-            let advected = interpolate_cell(
+            forward_state[idx] = interpolate_cell(
                 &atmosphere.cells_buffer,
                 atmosphere.width,
                 atmosphere.height,
                 x_back,
                 y_back,
             );
+        }
+    }
 
-            // Update cell with advected values
-            atmosphere.cells[idx].rho_o2 = advected.rho_o2;
-            atmosphere.cells[idx].rho_n2 = advected.rho_n2;
-            atmosphere.cells[idx].rho_co2 = advected.rho_co2;
-            atmosphere.cells[idx].u = advected.u;
-            atmosphere.cells[idx].v = advected.v;
-            atmosphere.cells[idx].temperature = advected.temperature;
+    // Step 2: Backward advection (corrector)
+    // φ** = φ* + dt * (u · ∇φ*)
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+            let cell = &forward_state[idx];
+
+            // Forward trace from predicted position
+            let x_forward = x as f32 + (cell.u * dt) / atmosphere.tile_size_physical;
+            let y_forward = y as f32 + (cell.v * dt) / atmosphere.tile_size_physical;
+
+            backward_state[idx] = interpolate_cell(
+                &forward_state,
+                atmosphere.width,
+                atmosphere.height,
+                x_forward,
+                y_forward,
+            );
+        }
+    }
+
+    // Step 3: MacCormack correction
+    // φⁿ⁺¹ = φ* + 0.5 * (φⁿ - φ**)
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+            let original = &atmosphere.cells_buffer[idx];
+            let forward = &forward_state[idx];
+            let backward = &backward_state[idx];
+
+            // Apply MacCormack correction
+            let corrected_rho_o2 = forward.rho_o2 + 0.5 * (original.rho_o2 - backward.rho_o2);
+            let corrected_rho_n2 = forward.rho_n2 + 0.5 * (original.rho_n2 - backward.rho_n2);
+            let corrected_rho_co2 = forward.rho_co2 + 0.5 * (original.rho_co2 - backward.rho_co2);
+            let corrected_u = forward.u + 0.5 * (original.u - backward.u);
+            let corrected_v = forward.v + 0.5 * (original.v - backward.v);
+            let corrected_temp = forward.temperature + 0.5 * (original.temperature - backward.temperature);
+
+            // Clamp to prevent negative densities and maintain physical bounds
+            atmosphere.cells[idx].rho_o2 = corrected_rho_o2.max(0.0);
+            atmosphere.cells[idx].rho_n2 = corrected_rho_n2.max(0.0);
+            atmosphere.cells[idx].rho_co2 = corrected_rho_co2.max(0.0);
+            atmosphere.cells[idx].u = corrected_u;
+            atmosphere.cells[idx].v = corrected_v;
+            atmosphere.cells[idx].temperature = corrected_temp.max(0.0);
             atmosphere.cells[idx].update_pressure();
         }
     }
@@ -483,10 +600,17 @@ fn bilerp(v00: f32, v10: f32, v01: f32, v11: f32, fx: f32, fy: f32) -> f32 {
 
 /// Step 2: Diffusion - viscosity and thermal diffusion
 /// Uses explicit method with small diffusion coefficients for stability
+///
+/// Stability condition for explicit diffusion: α = μ*dt/dx² < 0.25
+/// We clamp to ensure stability even with large timesteps from CFL limiting.
 fn diffusion_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
     let dx = atmosphere.tile_size_physical;
-    let alpha = constants::MU * dt / (dx * dx);
-    let kappa = constants::K_THERMAL * dt / (dx * dx);
+
+    // Stability limit for explicit diffusion (von Neumann analysis)
+    const MAX_ALPHA: f32 = 0.2; // Safety factor below theoretical limit of 0.25
+
+    let alpha = (constants::MU * dt / (dx * dx)).min(MAX_ALPHA);
+    let kappa = (constants::K_THERMAL * dt / (dx * dx)).min(MAX_ALPHA);
 
     // Copy to buffer
     atmosphere.cells_buffer.clone_from_slice(&atmosphere.cells);
@@ -552,7 +676,8 @@ fn diffusion_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollision
             atmosphere.cells[idx].temperature += kappa * laplacian_t;
 
             // Mass diffusion (Fick's law)
-            let d_coeff = 2.0e-5 * dt / (dx * dx); // Diffusion coefficient for gases in air
+            // Diffusion coefficient for gases in air: D ≈ 2×10⁻⁵ m²/s
+            let d_coeff = (2.0e-5 * dt / (dx * dx)).min(MAX_ALPHA);
             let laplacian_o2 =
                 left.rho_o2 + right.rho_o2 + down.rho_o2 + up.rho_o2 - 4.0 * c.rho_o2;
             let laplacian_n2 =
@@ -568,6 +693,19 @@ fn diffusion_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollision
 }
 
 /// Get cell or apply boundary condition for walls
+///
+/// This implements a "ghost cell" approach for boundary conditions:
+/// - For fluid cells: returns actual cell data
+/// - For wall cells: returns virtual cell with no-slip boundary condition (u=v=0)
+/// - For out-of-bounds: treats as sealed wall
+///
+/// The ghost cell values are used ONLY for computing spatial derivatives (Laplacians)
+/// in the diffusion step. Wall cells themselves are never updated.
+///
+/// Boundary conditions:
+/// - Velocity: No-slip (u=v=0 at walls)
+/// - Temperature: Adiabatic/Neumann (∂T/∂n = 0, enforced by mirroring)
+/// - Density: Neumann (∂ρ/∂n = 0, enforced by mirroring)
 fn get_or_boundary(
     cells: &[AtmosphereCell],
     width: u32,
@@ -582,24 +720,24 @@ fn get_or_boundary(
         if !collision_map.is_blocked(x as u32, y as u32) {
             cells[idx].clone()
         } else {
-            // Wall boundary: no-slip for velocity, adiabatic for temperature
+            // Ghost cell for wall: no-slip velocity, mirror other properties
             AtmosphereCell {
                 rho_o2: center.rho_o2,
                 rho_n2: center.rho_n2,
                 rho_co2: center.rho_co2,
-                u: 0.0,
+                u: 0.0, // No-slip boundary condition
                 v: 0.0,
-                temperature: center.temperature,
+                temperature: center.temperature, // Adiabatic (mirror)
                 pressure: center.pressure,
             }
         }
     } else {
-        // Outside boundary: treat as sealed wall to conserve mass
+        // Ghost cell for domain boundary: sealed wall (conserve mass)
         AtmosphereCell {
             rho_o2: center.rho_o2,
             rho_n2: center.rho_n2,
             rho_co2: center.rho_co2,
-            u: 0.0,
+            u: 0.0, // No-slip
             v: 0.0,
             temperature: center.temperature,
             pressure: center.pressure,
@@ -669,10 +807,20 @@ fn pressure_flux_step(
                         atmosphere.cells[idx_right].rho_n2 += delta_rho_n2;
                         atmosphere.cells[idx_right].rho_co2 += delta_rho_co2;
 
-                        // Transfer momentum: velocity follows the mass
-                        let momentum_transfer = total_flux / dx; // Force per unit area
-                        atmosphere.cells[idx].u += momentum_transfer * dt / cell.total_density().max(1e-6);
-                        atmosphere.cells[idx_right].u -= momentum_transfer * dt / cell_right.total_density().max(1e-6);
+                        // Transfer momentum: flowing mass carries its velocity with it
+                        // When mass dm flows from source to target, it carries momentum dm*u
+                        // Change in momentum: dp = dm * u_source
+                        // Change in velocity: dv = dp / (rho * V) = dm * u / (rho * V)
+                        let mass_flux = total_flux; // kg
+                        let source_rho = cell.total_density().max(1e-6);
+                        let target_rho = cell_right.total_density().max(1e-6);
+
+                        // Momentum flux in x-direction (mass carries its x-velocity)
+                        let momentum_flux_u = mass_flux * cell.u;
+
+                        // Update velocities: source loses momentum, target gains it
+                        atmosphere.cells[idx].u -= momentum_flux_u / (source_rho * cell_volume);
+                        atmosphere.cells[idx_right].u += momentum_flux_u / (target_rho * cell_volume);
                     }
                 }
             }
@@ -708,9 +856,17 @@ fn pressure_flux_step(
                         atmosphere.cells[idx_up].rho_n2 += delta_rho_n2;
                         atmosphere.cells[idx_up].rho_co2 += delta_rho_co2;
 
-                        let momentum_transfer = total_flux / dx;
-                        atmosphere.cells[idx].v += momentum_transfer * dt / cell.total_density().max(1e-6);
-                        atmosphere.cells[idx_up].v -= momentum_transfer * dt / cell_up.total_density().max(1e-6);
+                        // Transfer momentum: flowing mass carries its velocity with it
+                        let mass_flux = total_flux; // kg
+                        let source_rho = cell.total_density().max(1e-6);
+                        let target_rho = cell_up.total_density().max(1e-6);
+
+                        // Momentum flux in y-direction (mass carries its y-velocity)
+                        let momentum_flux_v = mass_flux * cell.v;
+
+                        // Update velocities: source loses momentum, target gains it
+                        atmosphere.cells[idx].v -= momentum_flux_v / (source_rho * cell_volume);
+                        atmosphere.cells[idx_up].v += momentum_flux_v / (target_rho * cell_volume);
                     }
                 }
             }
@@ -725,8 +881,14 @@ fn pressure_flux_step(
     }
 }
 
-/// Step 3: Pressure correction - enforce momentum conservation
-/// Simplified pressure projection to maintain divergence-free velocity
+/// Step 4: Pressure projection - enforce divergence-free velocity field
+///
+/// Implements pressure projection method to maintain mass conservation:
+/// 1. Compute velocity divergence: div = ∂u/∂x + ∂v/∂y
+/// 2. Solve Poisson equation for pressure correction: ∇²p = ρ/dt * div
+/// 3. Update velocities to be divergence-free: u_new = u - dt/ρ * ∇p
+///
+/// Uses Jacobi iteration to solve the Poisson equation.
 fn pressure_correction_step(
     atmosphere: &mut AtmosphereGrid,
     collision_map: &TileCollisionMap,
@@ -734,7 +896,12 @@ fn pressure_correction_step(
 ) {
     let dx = atmosphere.tile_size_physical;
 
-    // Compute pressure gradient and correct velocities
+    // Allocate pressure correction field
+    let cell_count = (atmosphere.width * atmosphere.height) as usize;
+    let mut pressure_correction = vec![0.0; cell_count];
+    let mut divergence = vec![0.0; cell_count];
+
+    // Step 1: Compute velocity divergence
     for y in 0..atmosphere.height {
         for x in 0..atmosphere.width {
             if collision_map.is_blocked(x, y) {
@@ -742,53 +909,205 @@ fn pressure_correction_step(
             }
 
             let idx = atmosphere.index(x, y);
-            let cell = &atmosphere.cells[idx];
 
-            // Get neighbor pressures
-            let p_c = cell.pressure;
+            // Compute divergence using central differences
+            let u_right = if x < atmosphere.width - 1 && !collision_map.is_blocked(x + 1, y) {
+                atmosphere.cells[atmosphere.index(x + 1, y)].u
+            } else {
+                atmosphere.cells[idx].u
+            };
+
+            let u_left = if x > 0 && !collision_map.is_blocked(x - 1, y) {
+                atmosphere.cells[atmosphere.index(x - 1, y)].u
+            } else {
+                atmosphere.cells[idx].u
+            };
+
+            let v_up = if y < atmosphere.height - 1 && !collision_map.is_blocked(x, y + 1) {
+                atmosphere.cells[atmosphere.index(x, y + 1)].v
+            } else {
+                atmosphere.cells[idx].v
+            };
+
+            let v_down = if y > 0 && !collision_map.is_blocked(x, y - 1) {
+                atmosphere.cells[atmosphere.index(x, y - 1)].v
+            } else {
+                atmosphere.cells[idx].v
+            };
+
+            let du_dx = (u_right - u_left) / (2.0 * dx);
+            let dv_dy = (v_up - v_down) / (2.0 * dx);
+
+            divergence[idx] = du_dx + dv_dy;
+        }
+    }
+
+    // Step 2: Solve Poisson equation: ∇²p = ρ/dt * div
+    // Using Jacobi iteration
+    let mut pressure_correction_temp = vec![0.0; cell_count];
+
+    for _iter in 0..constants::POISSON_MAX_ITERATIONS {
+        let mut max_change = 0.0;
+
+        for y in 0..atmosphere.height {
+            for x in 0..atmosphere.width {
+                if collision_map.is_blocked(x, y) {
+                    continue;
+                }
+
+                let idx = atmosphere.index(x, y);
+                let rho = atmosphere.cells[idx].total_density().max(1e-6);
+
+                // Get neighbor pressure corrections (Neumann BC at walls: ∂p/∂n = 0)
+                let p_left = if x > 0 && !collision_map.is_blocked(x - 1, y) {
+                    pressure_correction[atmosphere.index(x - 1, y)]
+                } else {
+                    pressure_correction[idx]
+                };
+
+                let p_right = if x < atmosphere.width - 1 && !collision_map.is_blocked(x + 1, y) {
+                    pressure_correction[atmosphere.index(x + 1, y)]
+                } else {
+                    pressure_correction[idx]
+                };
+
+                let p_down = if y > 0 && !collision_map.is_blocked(x, y - 1) {
+                    pressure_correction[atmosphere.index(x, y - 1)]
+                } else {
+                    pressure_correction[idx]
+                };
+
+                let p_up = if y < atmosphere.height - 1 && !collision_map.is_blocked(x, y + 1) {
+                    pressure_correction[atmosphere.index(x, y + 1)]
+                } else {
+                    pressure_correction[idx]
+                };
+
+                // Jacobi update: p_new = (p_left + p_right + p_down + p_up - dx²*rhs) / 4
+                let rhs = (rho / dt) * divergence[idx];
+                let p_new = (p_left + p_right + p_down + p_up - dx * dx * rhs) * 0.25;
+
+                pressure_correction_temp[idx] = p_new;
+                max_change = max_change.max((p_new - pressure_correction[idx]).abs());
+            }
+        }
+
+        // Copy temp to main
+        pressure_correction.copy_from_slice(&pressure_correction_temp);
+
+        // Check convergence
+        if max_change < constants::POISSON_TOLERANCE {
+            break;
+        }
+    }
+
+    // Step 3: Apply pressure correction to velocities
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+            let rho = atmosphere.cells[idx].total_density().max(1e-6);
+
+            // Compute pressure correction gradient
+            let p_c = pressure_correction[idx];
 
             let p_left = if x > 0 && !collision_map.is_blocked(x - 1, y) {
-                atmosphere.cells[atmosphere.index(x - 1, y)].pressure
+                pressure_correction[atmosphere.index(x - 1, y)]
             } else {
                 p_c
             };
 
             let p_right = if x < atmosphere.width - 1 && !collision_map.is_blocked(x + 1, y) {
-                atmosphere.cells[atmosphere.index(x + 1, y)].pressure
+                pressure_correction[atmosphere.index(x + 1, y)]
             } else {
                 p_c
             };
 
             let p_down = if y > 0 && !collision_map.is_blocked(x, y - 1) {
-                atmosphere.cells[atmosphere.index(x, y - 1)].pressure
+                pressure_correction[atmosphere.index(x, y - 1)]
             } else {
                 p_c
             };
 
             let p_up = if y < atmosphere.height - 1 && !collision_map.is_blocked(x, y + 1) {
-                atmosphere.cells[atmosphere.index(x, y + 1)].pressure
+                pressure_correction[atmosphere.index(x, y + 1)]
             } else {
                 p_c
             };
 
-            // Pressure gradient
             let dp_dx = (p_right - p_left) / (2.0 * dx);
             let dp_dy = (p_up - p_down) / (2.0 * dx);
 
-            // Correct velocity (momentum equation: du/dt = -1/ρ * dp/dx)
-            let rho = cell.total_density();
-            if rho > 1e-6 {
-                atmosphere.cells[idx].u -= (dt / rho) * dp_dx;
-                atmosphere.cells[idx].v -= (dt / rho) * dp_dy;
-            }
+            // Correct velocity to enforce divergence-free condition
+            atmosphere.cells[idx].u -= (dt / rho) * dp_dx;
+            atmosphere.cells[idx].v -= (dt / rho) * dp_dy;
         }
     }
+}
+
+/// Verify mass conservation in the simulation
+///
+/// Checks that total mass only changes due to intended sources/sinks (life support, respiration).
+/// Warns if numerical errors cause unexpected mass changes.
+fn check_mass_conservation(
+    atmosphere: Res<AtmosphereGrid>,
+    mut tracker: ResMut<MassTracker>,
+    time: Res<Time>,
+) {
+    tracker.time_since_check += time.delta_secs();
+
+    if tracker.time_since_check < constants::MASS_CHECK_INTERVAL {
+        return;
+    }
+
+    // Calculate total mass in the system [kg]
+    let tile_volume =
+        atmosphere.tile_size_physical * atmosphere.tile_size_physical * constants::ROOM_HEIGHT;
+    let total_mass: f32 = atmosphere
+        .cells
+        .iter()
+        .map(|cell| cell.total_density() * tile_volume)
+        .sum();
+
+    // First check (last_total_mass is 0), just record
+    if tracker.last_total_mass > f32::EPSILON {
+        let actual_delta = total_mass - tracker.last_total_mass;
+        let error = (actual_delta - tracker.expected_delta).abs();
+        let relative_error = if tracker.last_total_mass > f32::EPSILON {
+            error / tracker.last_total_mass
+        } else {
+            0.0
+        };
+
+        if relative_error > constants::MASS_TOLERANCE {
+            warn!(
+                "Mass conservation warning: Total mass changed by {:.6} kg (expected {:.6} kg from sources/sinks). Relative error: {:.2}%",
+                actual_delta,
+                tracker.expected_delta,
+                relative_error * 100.0
+            );
+        } else {
+            debug!(
+                "Mass conservation check: Total mass = {:.3} kg (delta: {:.6} kg, expected: {:.6} kg)",
+                total_mass, actual_delta, tracker.expected_delta
+            );
+        }
+    }
+
+    // Reset tracker
+    tracker.last_total_mass = total_mass;
+    tracker.time_since_check = 0.0;
+    tracker.expected_delta = 0.0; // Will be accumulated by sources/sinks in next interval
 }
 
 /// Life support generation system - produces O2 and N2 at life support tiles
 fn life_support_generation(
     mut atmosphere: ResMut<AtmosphereGrid>,
     life_support: Res<LifeSupportTiles>,
+    mut tracker: ResMut<MassTracker>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
@@ -796,6 +1115,8 @@ fn life_support_generation(
     // Calculate tile volume [m³]
     let tile_volume =
         atmosphere.tile_size_physical * atmosphere.tile_size_physical * constants::ROOM_HEIGHT;
+
+    let mut total_generated = 0.0;
 
     for pos in &life_support.positions {
         let idx = atmosphere.index(pos.x, pos.y);
@@ -813,11 +1134,103 @@ fn life_support_generation(
         cell.rho_o2 += delta_rho_o2;
         cell.rho_n2 += delta_rho_n2;
 
+        // Track total mass added
+        total_generated += o2_generated + n2_generated;
+
         // Set temperature to room temp if generating (life support heats the gas)
         if cell.temperature < constants::ROOM_TEMP {
             cell.temperature = constants::ROOM_TEMP;
         }
     }
+
+    // Update mass tracker with expected change
+    tracker.expected_delta += total_generated;
+}
+
+/// Monitor velocity field divergence
+///
+/// Computes and logs the maximum divergence to verify pressure projection is working.
+/// Ideally, divergence should be near zero after projection.
+fn monitor_divergence(
+    atmosphere: Res<AtmosphereGrid>,
+    collision_map: Res<TileCollisionMap>,
+    mut tracker: ResMut<DivergenceTracker>,
+    time: Res<Time>,
+) {
+    tracker.time_since_check += time.delta_secs();
+
+    if tracker.time_since_check < constants::MASS_CHECK_INTERVAL {
+        return;
+    }
+
+    let dx = atmosphere.tile_size_physical;
+    let mut max_divergence = 0.0;
+    let mut total_divergence = 0.0;
+    let mut cell_count = 0;
+
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+
+            // Compute divergence
+            let u_right = if x < atmosphere.width - 1 && !collision_map.is_blocked(x + 1, y) {
+                atmosphere.cells[atmosphere.index(x + 1, y)].u
+            } else {
+                atmosphere.cells[idx].u
+            };
+
+            let u_left = if x > 0 && !collision_map.is_blocked(x - 1, y) {
+                atmosphere.cells[atmosphere.index(x - 1, y)].u
+            } else {
+                atmosphere.cells[idx].u
+            };
+
+            let v_up = if y < atmosphere.height - 1 && !collision_map.is_blocked(x, y + 1) {
+                atmosphere.cells[atmosphere.index(x, y + 1)].v
+            } else {
+                atmosphere.cells[idx].v
+            };
+
+            let v_down = if y > 0 && !collision_map.is_blocked(x, y - 1) {
+                atmosphere.cells[atmosphere.index(x, y - 1)].v
+            } else {
+                atmosphere.cells[idx].v
+            };
+
+            let du_dx = (u_right - u_left) / (2.0 * dx);
+            let dv_dy = (v_up - v_down) / (2.0 * dx);
+            let div = du_dx + dv_dy;
+
+            max_divergence = max_divergence.max(div.abs());
+            total_divergence += div.abs();
+            cell_count += 1;
+        }
+    }
+
+    let avg_divergence = if cell_count > 0 {
+        total_divergence / cell_count as f32
+    } else {
+        0.0
+    };
+
+    debug!(
+        "Divergence check: max = {:.6} s⁻¹, avg = {:.6} s⁻¹",
+        max_divergence, avg_divergence
+    );
+
+    // Warn if divergence is too high (indicates projection not working well)
+    if max_divergence > 1.0 {
+        warn!(
+            "High velocity divergence detected: {:.3} s⁻¹ (pressure projection may need tuning)",
+            max_divergence
+        );
+    }
+
+    tracker.time_since_check = 0.0;
 }
 
 /// Local mixing fans mounted on the life support units to emulate forced convection
@@ -886,6 +1299,7 @@ fn life_support_mixing(
 fn player_respiration(
     mut atmosphere: ResMut<AtmosphereGrid>,
     collision_map: Res<TileCollisionMap>,
+    mut tracker: ResMut<MassTracker>,
     player_query: Query<&Transform, With<Player>>,
     time: Res<Time>,
 ) {
@@ -921,6 +1335,10 @@ fn player_respiration(
     cell.rho_o2 = (cell.rho_o2 + delta_rho_o2).max(0.0); // Can't go negative
     cell.rho_co2 += delta_rho_co2;
     cell.update_pressure();
+
+    // Track net mass change (CO2 produced - O2 consumed)
+    let net_mass_change = co2_produced - o2_consumed;
+    tracker.expected_delta += net_mass_change;
 
     // Log warning if oxygen is getting dangerously low
     // Normal O2 partial pressure: ~21 kPa. Below 16 kPa (~16% O2) is hypoxic
