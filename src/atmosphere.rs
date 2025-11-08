@@ -780,47 +780,59 @@ fn pressure_flux_step(
 
                 if p_diff.abs() > f32::EPSILON {
                     // Total mass flux [kg/s] driven by pressure difference
+                    // Positive p_diff: flow FROM cell TO cell_right
+                    // Negative p_diff: flow FROM cell_right TO cell
                     let total_flux = conductance * p_diff * dx * dt;
 
-                    // Distribute flux among gases proportional to their partial pressures
-                    if cell.pressure > f32::EPSILON {
-                        let p_o2 = (cell.rho_o2 / constants::M_O2) * constants::R * cell.temperature;
-                        let p_n2 = (cell.rho_n2 / constants::M_N2) * constants::R * cell.temperature;
-                        let p_co2 = (cell.rho_co2 / constants::M_CO2) * constants::R * cell.temperature;
+                    // Identify donor cell (where mass comes from)
+                    let (donor, donor_idx, receiver_idx) = if p_diff > 0.0 {
+                        (cell, idx, idx_right)
+                    } else {
+                        (cell_right, idx_right, idx)
+                    };
 
-                        let flux_o2 = total_flux * (p_o2 / cell.pressure);
-                        let flux_n2 = total_flux * (p_n2 / cell.pressure);
-                        let flux_co2 = total_flux * (p_co2 / cell.pressure);
+                    // Distribute flux among gases proportional to donor's partial pressures
+                    if donor.pressure > f32::EPSILON {
+                        let p_o2 = (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
+                        let p_n2 = (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
+                        let p_co2 = (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
+
+                        // Use absolute value of flux for species decomposition
+                        let abs_flux = total_flux.abs();
+                        let flux_o2 = abs_flux * (p_o2 / donor.pressure);
+                        let flux_n2 = abs_flux * (p_n2 / donor.pressure);
+                        let flux_co2 = abs_flux * (p_co2 / donor.pressure);
 
                         // Convert mass flux to density change
                         let delta_rho_o2 = flux_o2 / cell_volume;
                         let delta_rho_n2 = flux_n2 / cell_volume;
                         let delta_rho_co2 = flux_co2 / cell_volume;
 
-                        // Update source cell (loses mass)
-                        atmosphere.cells[idx].rho_o2 -= delta_rho_o2;
-                        atmosphere.cells[idx].rho_n2 -= delta_rho_n2;
-                        atmosphere.cells[idx].rho_co2 -= delta_rho_co2;
+                        // Update donor cell (loses mass)
+                        atmosphere.cells[donor_idx].rho_o2 -= delta_rho_o2;
+                        atmosphere.cells[donor_idx].rho_n2 -= delta_rho_n2;
+                        atmosphere.cells[donor_idx].rho_co2 -= delta_rho_co2;
 
-                        // Update target cell (gains mass)
-                        atmosphere.cells[idx_right].rho_o2 += delta_rho_o2;
-                        atmosphere.cells[idx_right].rho_n2 += delta_rho_n2;
-                        atmosphere.cells[idx_right].rho_co2 += delta_rho_co2;
+                        // Update receiver cell (gains mass)
+                        atmosphere.cells[receiver_idx].rho_o2 += delta_rho_o2;
+                        atmosphere.cells[receiver_idx].rho_n2 += delta_rho_n2;
+                        atmosphere.cells[receiver_idx].rho_co2 += delta_rho_co2;
 
-                        // Transfer momentum: flowing mass carries its velocity with it
-                        // When mass dm flows from source to target, it carries momentum dm*u
-                        // Change in momentum: dp = dm * u_source
-                        // Change in velocity: dv = dp / (rho * V) = dm * u / (rho * V)
-                        let mass_flux = total_flux; // kg
-                        let source_rho = cell.total_density().max(1e-6);
-                        let target_rho = cell_right.total_density().max(1e-6);
+                        // Transfer momentum: flowing mass carries donor's velocity
+                        // When mass dm flows from donor, it carries momentum dm * u_donor
+                        let mass_flux_abs = abs_flux; // kg
+                        let donor_rho = donor.total_density().max(1e-6);
+                        let donor_velocity_u = donor.u;
 
-                        // Momentum flux in x-direction (mass carries its x-velocity)
-                        let momentum_flux_u = mass_flux * cell.u;
+                        let receiver_cell = &atmosphere.cells_buffer[receiver_idx];
+                        let receiver_rho = receiver_cell.total_density().max(1e-6);
 
-                        // Update velocities: source loses momentum, target gains it
-                        atmosphere.cells[idx].u -= momentum_flux_u / (source_rho * cell_volume);
-                        atmosphere.cells[idx_right].u += momentum_flux_u / (target_rho * cell_volume);
+                        // Momentum flux in x-direction (mass carries donor's x-velocity)
+                        let momentum_flux_u = mass_flux_abs * donor_velocity_u;
+
+                        // Update velocities: donor loses momentum, receiver gains it
+                        atmosphere.cells[donor_idx].u -= momentum_flux_u / (donor_rho * cell_volume);
+                        atmosphere.cells[receiver_idx].u += momentum_flux_u / (receiver_rho * cell_volume);
                     }
                 }
             }
@@ -833,40 +845,59 @@ fn pressure_flux_step(
                 let p_diff = cell.pressure - cell_up.pressure;
 
                 if p_diff.abs() > f32::EPSILON {
+                    // Total mass flux [kg/s] driven by pressure difference
+                    // Positive p_diff: flow FROM cell TO cell_up
+                    // Negative p_diff: flow FROM cell_up TO cell
                     let total_flux = conductance * p_diff * dx * dt;
 
-                    if cell.pressure > f32::EPSILON {
-                        let p_o2 = (cell.rho_o2 / constants::M_O2) * constants::R * cell.temperature;
-                        let p_n2 = (cell.rho_n2 / constants::M_N2) * constants::R * cell.temperature;
-                        let p_co2 = (cell.rho_co2 / constants::M_CO2) * constants::R * cell.temperature;
+                    // Identify donor cell (where mass comes from)
+                    let (donor, donor_idx, receiver_idx) = if p_diff > 0.0 {
+                        (cell, idx, idx_up)
+                    } else {
+                        (cell_up, idx_up, idx)
+                    };
 
-                        let flux_o2 = total_flux * (p_o2 / cell.pressure);
-                        let flux_n2 = total_flux * (p_n2 / cell.pressure);
-                        let flux_co2 = total_flux * (p_co2 / cell.pressure);
+                    // Distribute flux among gases proportional to donor's partial pressures
+                    if donor.pressure > f32::EPSILON {
+                        let p_o2 = (donor.rho_o2 / constants::M_O2) * constants::R * donor.temperature;
+                        let p_n2 = (donor.rho_n2 / constants::M_N2) * constants::R * donor.temperature;
+                        let p_co2 = (donor.rho_co2 / constants::M_CO2) * constants::R * donor.temperature;
+
+                        // Use absolute value of flux for species decomposition
+                        let abs_flux = total_flux.abs();
+                        let flux_o2 = abs_flux * (p_o2 / donor.pressure);
+                        let flux_n2 = abs_flux * (p_n2 / donor.pressure);
+                        let flux_co2 = abs_flux * (p_co2 / donor.pressure);
 
                         let delta_rho_o2 = flux_o2 / cell_volume;
                         let delta_rho_n2 = flux_n2 / cell_volume;
                         let delta_rho_co2 = flux_co2 / cell_volume;
 
-                        atmosphere.cells[idx].rho_o2 -= delta_rho_o2;
-                        atmosphere.cells[idx].rho_n2 -= delta_rho_n2;
-                        atmosphere.cells[idx].rho_co2 -= delta_rho_co2;
+                        // Update donor cell (loses mass)
+                        atmosphere.cells[donor_idx].rho_o2 -= delta_rho_o2;
+                        atmosphere.cells[donor_idx].rho_n2 -= delta_rho_n2;
+                        atmosphere.cells[donor_idx].rho_co2 -= delta_rho_co2;
 
-                        atmosphere.cells[idx_up].rho_o2 += delta_rho_o2;
-                        atmosphere.cells[idx_up].rho_n2 += delta_rho_n2;
-                        atmosphere.cells[idx_up].rho_co2 += delta_rho_co2;
+                        // Update receiver cell (gains mass)
+                        atmosphere.cells[receiver_idx].rho_o2 += delta_rho_o2;
+                        atmosphere.cells[receiver_idx].rho_n2 += delta_rho_n2;
+                        atmosphere.cells[receiver_idx].rho_co2 += delta_rho_co2;
 
-                        // Transfer momentum: flowing mass carries its velocity with it
-                        let mass_flux = total_flux; // kg
-                        let source_rho = cell.total_density().max(1e-6);
-                        let target_rho = cell_up.total_density().max(1e-6);
+                        // Transfer momentum: flowing mass carries donor's velocity
+                        // When mass dm flows from donor, it carries momentum dm * v_donor
+                        let mass_flux_abs = abs_flux; // kg
+                        let donor_rho = donor.total_density().max(1e-6);
+                        let donor_velocity_v = donor.v;
 
-                        // Momentum flux in y-direction (mass carries its y-velocity)
-                        let momentum_flux_v = mass_flux * cell.v;
+                        let receiver_cell = &atmosphere.cells_buffer[receiver_idx];
+                        let receiver_rho = receiver_cell.total_density().max(1e-6);
 
-                        // Update velocities: source loses momentum, target gains it
-                        atmosphere.cells[idx].v -= momentum_flux_v / (source_rho * cell_volume);
-                        atmosphere.cells[idx_up].v += momentum_flux_v / (target_rho * cell_volume);
+                        // Momentum flux in y-direction (mass carries donor's y-velocity)
+                        let momentum_flux_v = mass_flux_abs * donor_velocity_v;
+
+                        // Update velocities: donor loses momentum, receiver gains it
+                        atmosphere.cells[donor_idx].v -= momentum_flux_v / (donor_rho * cell_volume);
+                        atmosphere.cells[receiver_idx].v += momentum_flux_v / (receiver_rho * cell_volume);
                     }
                 }
             }
