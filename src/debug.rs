@@ -25,7 +25,7 @@ struct PressureLogState {
 impl Plugin for PressureLoggerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(PressureLogConfig {
-            path: PathBuf::from("debug/pressure.csv"),
+            path: PathBuf::from(".debug/pressure.csv"),
         })
         .insert_resource(PressureLogState {
             timer: Timer::from_seconds(1.0, TimerMode::Repeating),
