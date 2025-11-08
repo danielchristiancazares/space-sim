@@ -6,6 +6,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A 2D space station game built with Bevy 0.15 game engine featuring 8-directional player movement, smooth camera following, and tile-based collision detection with `bevy_ecs_tilemap`.
 
+## Git Workflow
+
+### Branch Naming Convention
+
+**IMPORTANT**: Use conventional topic branch names, NOT `claude/*` prefixes.
+
+When creating branches, follow these conventions:
+- `fix/description` - For bug fixes (e.g., `fix/momentum-physics`)
+- `feature/description` - For new features (e.g., `feature/life-support`)
+- `refactor/description` - For code refactoring (e.g., `refactor/atmosphere-grid`)
+- `docs/description` - For documentation updates (e.g., `docs/physics-constants`)
+- `test/description` - For adding tests (e.g., `test/conservation-checks`)
+
+### Examples
+
+```bash
+# Good ✓
+git checkout -b fix/pressure-correction
+git checkout -b feature/airlock-system
+git checkout -b refactor/collision-detection
+
+# Bad ✗
+git checkout -b claude/fix-physics
+git checkout -b my-changes
+git checkout -b update
+```
+
 ## Build Commands
 
 ```bash

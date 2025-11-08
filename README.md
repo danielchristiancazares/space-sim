@@ -1,6 +1,6 @@
 # Space Station Atmospheric Simulation
 
-A 2D space station physics simulation built with Bevy 0.15, featuring realistic atmospheric modeling with compressible Navier-Stokes fluid dynamics. The project simulates O₂/N₂/CO₂ gas diffusion, pressure dynamics, player respiration, and life support systems with forced convection on an accelerated timescale.
+A 2D fluid dynamics physics simulation built with Bevy 0.15, featuring realistic atmospheric modeling with compressible Navier-Stokes fluid dynamics. The project simulates O₂/N₂/CO₂ gas diffusion, pressure dynamics, player respiration, and life support systems with forced convection on an accelerated timescale. This repository is a simulation testbed rather than a traditional game.
 
 > **Repository status:** No commits have been made yet. This README documents the current simulation capabilities.
 
@@ -67,8 +67,21 @@ space-sim/
 │       └── life_support.png
 ├── src/
 │   ├── animation.rs                # Character sprite rotation system
-│   ├── atmosphere.rs               # Atmospheric physics simulation
+│   ├── atmosphere/                 # Atmospheric simulation modules
+│   │   ├── constants.rs            # Physical/tuning constants
+│   │   ├── grid.rs                 # Atmosphere grid resource & cell definitions
+│   │   ├── monitoring.rs           # Mass/divergence trackers
+│   │   ├── sources.rs              # Life support & respiration systems
+│   │   ├── steps/                  # CFD operator implementations
+│   │   │   ├── advection.rs
+│   │   │   ├── diffusion.rs
+│   │   │   ├── pressure_flux.rs
+│   │   │   └── pressure_projection.rs
+│   │   ├── debug.rs                # Visualization helpers
+│   │   ├── plugin.rs               # Bevy plugin + schedule wiring
+│   │   └── simulation.rs           # Frame orchestration
 │   ├── camera.rs                   # Smooth camera follow
+│   ├── debug.rs                    # Pressure logger
 │   ├── main.rs                     # Plugin registration
 │   ├── player.rs                   # Movement and collision
 │   └── tilemap.rs                  # Map loading and collision grid
@@ -79,20 +92,21 @@ space-sim/
 ## Architecture Overview
 
 ### Atmospheric Simulation Pipeline
-The atmosphere system (src/atmosphere.rs:312-351) runs every frame with operator splitting:
+The atmosphere plugin orchestrates a four-step CFD loop each frame:
 
-1. **Life support generation** (src/atmosphere.rs:641-688): Adds O₂/N₂ at life support tiles based on `LIFE_SUPPORT_O2_RATE` (4.7 kg/s) and `LIFE_SUPPORT_N2_RATE` (15.6 kg/s)
+1. **Life support generation** (`sources.rs`): Adds O₂/N₂ at life support tiles based on `LIFE_SUPPORT_O2_RATE` (4.7 kg/s) and `LIFE_SUPPORT_N2_RATE` (15.6 kg/s)
 
-2. **Forced convection** (src/atmosphere.rs:690-750): Fans create 1.5 m/s tangential swirl within 3-tile radius to distribute gases faster than diffusion alone
+2. **Forced convection** (`sources.rs`): Fans create 1.5 m/s tangential swirl within a 3-tile radius to distribute gases faster than diffusion alone
 
-3. **Player respiration** (src/atmosphere.rs:752-814): Consumes O₂ at 5.54×10⁻⁶ kg/s and produces CO₂ at 6.09×10⁻⁶ kg/s (human resting rate)
+3. **Player respiration** (`sources.rs`): Consumes O₂ at 5.54×10⁻⁶ kg/s and produces CO₂ at 6.09×10⁻⁶ kg/s (human resting rate)
 
-4. **Pressure update** (src/atmosphere.rs:294-305): Recomputes pressure from densities using ideal gas law
+4. **Pressure update** (`simulation.rs`): Recomputes pressure from densities using the ideal gas law
 
-5. **Fluid dynamics simulation**:
-   - **Advection** (src/atmosphere.rs:363-402): Semi-Lagrangian method transports gases by velocity field
-   - **Diffusion** (src/atmosphere.rs:455-539): Viscosity (μ = 1.8×10⁻⁵ Pa·s) and mass diffusion (D = 2×10⁻⁵ m²/s)
-   - **Pressure correction** (src/atmosphere.rs:581-639): Enforces momentum conservation via pressure gradients
+5. **Fluid dynamics simulation** (`steps/`):
+   - **Advection** (`steps/advection.rs`): MacCormack transport of density, momentum, and temperature
+   - **Diffusion** (`steps/diffusion.rs`): Viscous and scalar diffusion
+   - **Pressure-driven flux** (`steps/pressure_flux.rs`): Mass exchange along pressure gradients with momentum transfer
+   - **Pressure projection** (`steps/pressure_projection.rs`): Enforces near-zero velocity divergence
 
 ### Collision System
 The `TileCollisionMap` (src/tilemap.rs:14-68) separates rendering from gameplay:
@@ -108,7 +122,7 @@ JSON format (assets/maps/untitled_map.json):
 
 ## Physical Constants
 
-All constants in src/atmosphere.rs:6-73:
+All constants in `src/atmosphere/constants.rs`:
 
 **Gas properties:**
 - Universal gas constant: R = 8.314 J/(mol·K)
@@ -170,7 +184,7 @@ This is a **physics simulation testbed** on an accelerated timescale, not a trad
 - Hypoxia/hypercapnia player status effects
 
 ## Contribution Guidelines
-- Keep physics constants in `atmosphere.rs::constants` module
+- Keep physics constants in `atmosphere/constants.rs`
 - Document units in comments (kg, m, s, Pa, K)
 - Test with visualization overlay (V key) to verify gas behavior
 - Maintain separation between rendering (tilemap) and collision (collision map)
