@@ -156,13 +156,15 @@ pub const T_PHYS_MAX: f32 = 1000.0;
 /// Should rarely be reached with proper hot-spot braking
 pub const T_MAX: f32 = 2000.0;
 
-/// Maximum fractional temperature increase per substep
-/// Conservative: +0.2% per step prevents extreme heating
-pub const MAX_FRAC_T_PER_STEP_POS: f32 = 0.002;
+/// Maximum fractional temperature increase per second
+/// Conservative: +0.2%/s prevents extreme heating
+/// Note: Scaled by dt in compression step to be timestep-independent
+pub const MAX_FRAC_T_POS_PER_S: f32 = 0.002;
 
-/// Maximum fractional temperature decrease per substep
-/// Permissive: -0.5% per step allows faster thermal relaxation
-pub const MAX_FRAC_T_PER_STEP_NEG: f32 = 0.005;
+/// Maximum fractional temperature decrease per second
+/// Permissive: -0.5%/s allows faster thermal relaxation
+/// Note: Scaled by dt in compression step to be timestep-independent
+pub const MAX_FRAC_T_NEG_PER_S: f32 = 0.005;
 
 // ============================================================================
 // Artificial Viscosity Presets for Shock Regularization

@@ -40,10 +40,6 @@ pub fn compression_heating_step(
     let dx = atmosphere.tile_size_physical;
     let width = atmosphere.width as usize;
 
-    // Precompute log limits once (constant across all cells)
-    let max_log_pos = (1.0 + constants::MAX_FRAC_T_PER_STEP_POS).ln(); // ~0.001998
-    let max_log_neg = (1.0 - constants::MAX_FRAC_T_PER_STEP_NEG).ln(); // ~-0.005012
-
     // Counters for hot-spot brake diagnostics (thread-safe)
     let hot_zone_entries = AtomicUsize::new(0);
     let phys_max_caps = AtomicUsize::new(0);
@@ -94,7 +90,7 @@ pub fn compression_heating_step(
                     div_u
                 );
 
-                let t_old = cell.temperature;
+                let t_old = cell.temperature.max(constants::T_CMB);
                 let gamma_minus_1 = constants::GAMMA - 1.0;
 
                 // ============================================================
@@ -109,52 +105,39 @@ pub fn compression_heating_step(
                 // Step 1: Compute raw log-change
                 let dlog_t_raw = -gamma_minus_1 * div_u * dt;
 
-                // Step 2: Asymmetric clamp (tight on heating, loose on cooling)
-                let dlog_t_clamped = if dlog_t_raw > 0.0 {
-                    dlog_t_raw.min(max_log_pos) // Heating: limited to +0.2%
-                } else {
-                    dlog_t_raw.max(max_log_neg) // Cooling: limited to -0.5%
-                };
+                // Step 2: Per-second fractional limits, scaled by dt
+                // This ensures rate limits are independent of substep size
+                let max_log_pos = (1.0 + constants::MAX_FRAC_T_POS_PER_S * dt).ln();
+                let max_log_neg = (1.0 - constants::MAX_FRAC_T_NEG_PER_S * dt).ln();
 
-                // Step 3: Hot-spot brake (three-zone system)
-                let dlog_t_final = if t_old < constants::T_HOT {
-                    // Zone 1: Below T_HOT - full compression heating
-                    dlog_t_clamped
-                } else if t_old < constants::T_PHYS_MAX {
-                    // Zone 2: T_HOT to T_PHYS_MAX - linear taper to zero
-                    let scale = (constants::T_PHYS_MAX - t_old) / (constants::T_PHYS_MAX - constants::T_HOT);
+                let mut dlog_t = dlog_t_raw.clamp(max_log_neg, max_log_pos);
 
-                    // Track first entry into hot zone
-                    if t_old >= constants::T_HOT && t_old - dlog_t_clamped.abs() * t_old < constants::T_HOT {
-                        hot_zone_entries.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    if dlog_t_clamped > 0.0 {
-                        // Only taper heating, not cooling
-                        dlog_t_clamped * scale
-                    } else {
-                        dlog_t_clamped
-                    }
-                } else {
-                    // Zone 3: Above T_PHYS_MAX - no heating allowed, only cooling
-
-                    // Track cells hitting physics ceiling
-                    if t_old >= constants::T_PHYS_MAX && t_old < constants::T_PHYS_MAX + 10.0 {
+                // Step 3: Zone-based hot-spot brake (applied only to heating)
+                if dlog_t > 0.0 {
+                    if t_old >= constants::T_PHYS_MAX {
+                        // Zone 3: No heating above physical ceiling
                         phys_max_caps.fetch_add(1, Ordering::Relaxed);
-                    }
+                        dlog_t = 0.0;
+                    } else if t_old >= constants::T_HOT {
+                        // Zone 2: Taper heating between T_HOT and T_PHYS_MAX
+                        let scale = ((constants::T_PHYS_MAX - t_old) / (constants::T_PHYS_MAX - constants::T_HOT))
+                            .clamp(0.0, 1.0);
 
-                    dlog_t_clamped.min(0.0)
-                };
+                        hot_zone_entries.fetch_add(1, Ordering::Relaxed);
+                        dlog_t *= scale;
+                    }
+                    // Zone 1 (t_old < T_HOT): Full compression heating (no change to dlog_t)
+                }
 
                 // Step 4: Apply exponential update
-                let t_new = t_old * dlog_t_final.exp();
+                let t_new = t_old * dlog_t.exp();
 
                 // Hard panic on non-finite (catches numerical explosion early)
                 if !t_new.is_finite() {
                     panic!(
                         "Non-finite temperature at ({}, {}): T_old={:.2} K, \
-                         div_u={:.2} s⁻¹, dlog_t_raw={:.6}, dlog_t_final={:.6}",
-                        x_u32, y_u32, t_old, div_u, dlog_t_raw, dlog_t_final
+                         div_u={:.2} s⁻¹, dlog_t_raw={:.6}, dlog_t={:.6}",
+                        x_u32, y_u32, t_old, div_u, dlog_t_raw, dlog_t
                     );
                 }
 
