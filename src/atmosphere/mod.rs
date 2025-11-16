@@ -17,7 +17,7 @@ mod sources;
 
 pub use grid::{AtmosphereCell, AtmosphereGrid};
 pub use observability::{
-    estimate_file_size, CsvExporter, PressureLoggerPlugin, SimulationDiagnostics,
+    estimate_file_size, CsvExporter, HeatmapPlugin, PressureLoggerPlugin, SimulationDiagnostics,
 };
 pub use plugin::{AtmospherePlugin, AtmosphereSimSet};
 pub use simulation::{simulate_atmosphere, update_grid_pressures};
