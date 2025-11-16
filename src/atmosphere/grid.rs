@@ -112,16 +112,6 @@ pub struct AtmosphereGrid {
     pub cells: Vec<AtmosphereCell>,
     /// Temporary buffer for multi-step integration
     pub cells_buffer: Vec<AtmosphereCell>,
-    /// MacCormack forward state buffer
-    pub forward_state: Vec<AtmosphereCell>,
-    /// MacCormack backward state buffer
-    pub backward_state: Vec<AtmosphereCell>,
-    /// Pressure projection: pressure corrections
-    pub pressure_correction: Vec<f32>,
-    /// Pressure projection: temp buffer
-    pub pressure_correction_temp: Vec<f32>,
-    /// Pressure projection: divergence field
-    pub divergence: Vec<f32>,
 }
 
 impl AtmosphereGrid {
@@ -135,11 +125,6 @@ impl AtmosphereGrid {
             tile_size_physical,
             cells: vec![AtmosphereCell::default(); cell_count],
             cells_buffer: vec![AtmosphereCell::default(); cell_count],
-            forward_state: vec![AtmosphereCell::default(); cell_count],
-            backward_state: vec![AtmosphereCell::default(); cell_count],
-            pressure_correction: vec![0.0; cell_count],
-            pressure_correction_temp: vec![0.0; cell_count],
-            divergence: vec![0.0; cell_count],
         }
     }
 

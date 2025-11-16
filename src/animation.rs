@@ -150,7 +150,7 @@ fn animate_character_sprite(
             continue;
         };
 
-        let is_moving = matches!(*state, MovementState::Walking | MovementState::Running);
+        let is_moving = matches!(*state, MovementState::Walking);
 
         cycle.ensure_duration(walk_animation.speed_fps);
 
@@ -161,7 +161,7 @@ fn animate_character_sprite(
 
         if is_moving && !frames.frames.is_empty() {
             cycle.timer.tick(time.delta());
-            if cycle.timer.finished() {
+            if cycle.timer.is_finished() {
                 cycle.frame_index = (cycle.frame_index + 1) % frames.frames.len();
             }
             let frame = frames.frames[cycle.frame_index].clone();

@@ -95,14 +95,6 @@ pub const FAN_SWIRL_SPEED: f32 = 1.5;
 /// matched playtest expectations for “noticeable but not instant” circulation.
 pub const FAN_BLEND: f32 = 0.35;
 
-/// Pressure-driven mass flux conductance [kg/(Pa·m·s)]
-/// Controls how fast gases flow from high to low pressure
-/// Tuned for realistic expansion into vacuum while maintaining stability
-pub const PRESSURE_FLUX_CONDUCTANCE: f32 = 0.01;
-
-/// Maximum fraction of a cell's mass that can be transferred in a single flux step
-pub const PRESSURE_FLUX_MAX_FRACTION: f32 = 0.2;
-
 /// Mass conservation check interval (seconds)
 /// How often to verify total mass conservation
 pub const MASS_CHECK_INTERVAL: f32 = 5.0;
@@ -119,8 +111,46 @@ pub const MASS_TOLERANCE: f32 = 0.01; // 1%
 /// Using 0.5 provides good stability margin
 pub const CFL_NUMBER: f32 = 0.5;
 
-/// Poisson solver maximum iterations
-pub const POISSON_MAX_ITERATIONS: usize = 50;
+/// Ratio of specific heats (Cp/Cv) for air [dimensionless]
+/// For diatomic gases (O₂, N₂): γ ≈ 1.4
+/// Used in compression/expansion heating: ∂T/∂t = -(γ-1)T∇·u
+pub const GAMMA: f32 = 1.4;
 
-/// Poisson solver convergence tolerance
-pub const POISSON_TOLERANCE: f32 = 1e-4;
+/// Specific gas constant for air [J/(kg·K)]
+/// R_specific = R_universal / M_air where M_air ≈ 0.029 kg/mol
+/// Used in sound speed calculation: c = √(γRT)
+pub const R_SPECIFIC_AIR: f32 = 287.05;
+
+/// CFL diagnostic mode (safety/paranoid mode for debugging)
+/// Use this if standard CFL_NUMBER = 0.5 shows instability
+pub const CFL_DIAGNOSTIC: f32 = 0.3;
+
+/// Cosmic microwave background temperature [K]
+/// Absolute physical minimum for temperature clamping
+pub const T_CMB: f32 = 2.7;
+
+// ============================================================================
+// Artificial Viscosity Presets for Shock Regularization
+// ============================================================================
+// At coarse grid resolution (1m cells), molecular viscosity is insufficient
+// to regularize supersonic expansion shocks. Artificial viscosity represents
+// unresolved subgrid turbulence and prevents numerical oscillations.
+//
+// Formula: ν_artificial = COEFF × Δx × |u_max|
+//
+// Quality modes:
+//   - QUALITY (0.05):     Minimal damping, preserves fine structures
+//   - PRODUCTION (0.1):   Balanced damping (DEFAULT for research)
+//   - SAFETY (0.2):       Strong damping, very stable
+
+/// Artificial viscosity coefficient: minimal damping
+pub const ARTIFICIAL_VISCOSITY_QUALITY: f32 = 0.05;
+
+/// Artificial viscosity coefficient: balanced damping (DEFAULT)
+pub const ARTIFICIAL_VISCOSITY_PRODUCTION: f32 = 0.1;
+
+/// Artificial viscosity coefficient: strong damping
+pub const ARTIFICIAL_VISCOSITY_SAFETY: f32 = 0.2;
+
+/// Active artificial viscosity setting
+pub const ARTIFICIAL_VISCOSITY: f32 = ARTIFICIAL_VISCOSITY_PRODUCTION;

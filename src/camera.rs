@@ -24,7 +24,7 @@ fn camera_follow_player(
     player_query: Query<&Transform, With<Player>>,
     mut camera_query: Query<(&mut Transform, &MainCamera), (Without<Player>, With<Camera2d>)>,
 ) {
-    if let Ok(player_transform) = player_query.get_single() {
+    if let Ok(player_transform) = player_query.single() {
         for (mut camera_transform, camera) in &mut camera_query {
             // Smooth interpolation towards player position
             let target = player_transform.translation;
