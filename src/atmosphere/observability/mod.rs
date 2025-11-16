@@ -1,4 +1,5 @@
 pub mod export;
+pub mod heatmap;
 pub mod metrics;
 pub mod monitors;
 pub mod pressure_logger;
@@ -8,6 +9,7 @@ use bevy::prelude::*;
 
 // Re-exports for existing call sites
 pub use export::{estimate_file_size, CsvExporter};
+pub use heatmap::HeatmapPlugin;
 pub use metrics::SimulationDiagnostics;
 pub use pressure_logger::PressureLoggerPlugin;
 pub use viz::debug_visualization;
@@ -86,5 +88,8 @@ impl Plugin for AtmosphereObservabilityPlugin {
         if config.enable_pressure_logger {
             app.add_plugins(PressureLoggerPlugin);
         }
+
+        // Heatmap visualization (always enabled)
+        app.add_plugins(heatmap::HeatmapPlugin);
     }
 }
