@@ -47,19 +47,15 @@ pub fn debug_visualization(
 ) {
     if keyboard.just_pressed(KeyCode::Digit3) {
         state.reset();
-        info!("Atmosphere visualization reset (heatmap on, velocity arrows off)");
+        info!("Atmosphere visualization reset (velocity arrows off)");
+        info!("Note: Press '1' to toggle texture-based heatmap (handled by HeatmapPlugin)");
     }
 
+    // Note: '1' key toggle is now handled by HeatmapPlugin (texture-based heatmap)
+    // This gizmo-based visualization is deprecated
     if keyboard.just_pressed(KeyCode::Digit1) {
         state.heatmap_enabled = !state.heatmap_enabled;
-        info!(
-            "Atmosphere heatmap {}",
-            if state.heatmap_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
+        // No longer log here - HeatmapPlugin handles the toggle
     }
 
     if keyboard.just_pressed(KeyCode::Digit2) {
@@ -92,7 +88,10 @@ pub fn debug_visualization(
             let idx = atmosphere.index(x, y);
             let cell = &atmosphere.cells[idx];
 
-            if state.heatmap_enabled {
+            // Note: Gizmo-based heatmap is deprecated in favor of texture-based heatmap
+            // This code is kept for reference but not rendered
+            // The texture-based heatmap (HeatmapPlugin) now handles visualization
+            if false && state.heatmap_enabled {
                 let color = get_cell_color(
                     &atmosphere,
                     &collision_map,
