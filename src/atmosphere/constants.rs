@@ -130,6 +130,41 @@ pub const CFL_DIAGNOSTIC: f32 = 0.3;
 pub const T_CMB: f32 = 2.7;
 
 // ============================================================================
+// Temperature Control for Compression Heating
+// ============================================================================
+// These constants regulate the hot-spot brake system that prevents unrealistic
+// temperature spikes from sustained compression zones.
+//
+// Three-zone system:
+//   Zone 1 (T < T_HOT):           Full compression heating
+//   Zone 2 (T_HOT to T_PHYS_MAX): Linear taper to zero
+//   Zone 3 (T >= T_PHYS_MAX):     No heating, only cooling
+//
+// The asymmetric rate limits ensure:
+//   - Conservative heating (prevent spikes)
+//   - Faster cooling (allow thermal relaxation)
+
+/// Temperature threshold where hot-spot brake starts tapering [K]
+/// "Silly hot for a room" - reasonable upper bound for habitable spaces
+pub const T_HOT: f32 = 800.0;
+
+/// Physics ceiling - compression heating stops completely [K]
+/// Matches diagnostic warning threshold for temperature violations
+pub const T_PHYS_MAX: f32 = 1000.0;
+
+/// Absolute safety cap for numerical stability [K]
+/// Should rarely be reached with proper hot-spot braking
+pub const T_MAX: f32 = 2000.0;
+
+/// Maximum fractional temperature increase per substep
+/// Conservative: +0.2% per step prevents extreme heating
+pub const MAX_FRAC_T_PER_STEP_POS: f32 = 0.002;
+
+/// Maximum fractional temperature decrease per substep
+/// Permissive: -0.5% per step allows faster thermal relaxation
+pub const MAX_FRAC_T_PER_STEP_NEG: f32 = 0.005;
+
+// ============================================================================
 // Artificial Viscosity Presets for Shock Regularization
 // ============================================================================
 // At coarse grid resolution (1m cells), molecular viscosity is insufficient

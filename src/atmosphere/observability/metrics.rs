@@ -195,8 +195,6 @@ impl SimulationDiagnostics {
 
         // Speed of sound in air at room temp [m/s]
         const SPEED_OF_SOUND: f32 = 343.0;
-        const MIN_PHYSICAL_TEMP: f32 = 2.7; // Cosmic microwave background
-        const MAX_PHYSICAL_TEMP: f32 = 1000.0; // Reasonable upper bound for room simulation
 
         for y in 0..atmosphere.height {
             for x in 0..atmosphere.width {
@@ -254,7 +252,7 @@ impl SimulationDiagnostics {
                     self.supersonic_count += 1;
                 }
 
-                if cell.temperature < MIN_PHYSICAL_TEMP || cell.temperature > MAX_PHYSICAL_TEMP {
+                if cell.temperature < constants::T_CMB || cell.temperature > constants::T_PHYS_MAX {
                     self.temp_violation_count += 1;
                 }
             }
