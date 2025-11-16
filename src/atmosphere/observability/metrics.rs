@@ -502,7 +502,7 @@ impl SimulationDiagnostics {
             self.sim_time, self.frame
         );
         info!(
-            "  Temperature: avg={:.1}K, min={:.1}K, max={:.1}K",
+            "  Temperature: avg={:.1} K, min={:.1} K, max={:.1} K",
             self.avg_temperature, self.min_temperature, self.max_temperature
         );
         info!(
@@ -551,7 +551,7 @@ impl SimulationDiagnostics {
 
         if self.temp_violation_count > 0 {
             warn!(
-                "Frame {}: Temperature out of physical range [2.7K, 1000K] in {} cells (min={:.1}K, max={:.1}K)",
+                "Frame {}: Temperature out of physical range [2.7 K, 1000.0 K] in {} cells (min={:.1} K, max={:.1} K)",
                 self.frame, self.temp_violation_count, self.min_temperature, self.max_temperature
             );
         }
