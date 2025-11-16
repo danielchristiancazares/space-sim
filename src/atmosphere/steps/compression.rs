@@ -158,8 +158,8 @@ pub fn compression_heating_step(
                     );
                 }
 
-                // Physical bounds (CMB minimum to absolute safety cap)
-                row[x].temperature = t_new.clamp(constants::T_CMB, constants::T_MAX);
+                // Physical bounds (CMB minimum to physics ceiling)
+                row[x].temperature = t_new.clamp(constants::T_CMB, constants::T_PHYS_MAX);
             }
         });
 
