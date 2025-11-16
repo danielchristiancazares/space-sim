@@ -18,7 +18,6 @@ pub enum MovementState {
     #[default]
     Idle,
     Walking,
-    Running,
 }
 
 pub struct PlayerPlugin;

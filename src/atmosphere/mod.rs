@@ -1,24 +1,26 @@
+#![allow(unused_imports)]
+
 pub mod constants;
 
 mod grid;
+pub mod observability;
 mod plugin;
 mod simulation;
 
 pub mod steps {
     pub mod advection;
+    pub mod compression;
     pub mod diffusion;
-    pub mod pressure_flux;
-    pub mod pressure_projection;
 }
 
-mod debug;
-mod monitoring;
 mod sources;
 
-#[allow(unused_imports)]
 pub use grid::{AtmosphereCell, AtmosphereGrid};
-#[allow(unused_imports)]
-pub use monitoring::{DivergenceTracker, MassTracker};
+pub use observability::{
+    estimate_file_size, CsvExporter, PressureLoggerPlugin, SimulationDiagnostics,
+};
 pub use plugin::{AtmospherePlugin, AtmosphereSimSet};
-#[allow(unused_imports)]
-pub use simulation::update_grid_pressures;
+pub use simulation::{simulate_atmosphere, update_grid_pressures};
+pub use sources::{
+    life_support_generation, life_support_mixing, player_respiration, BreathabilityWarningTracker,
+};

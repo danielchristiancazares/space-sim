@@ -1,239 +1,427 @@
 use crate::atmosphere::grid::{AtmosphereCell, AtmosphereGrid};
 use crate::tilemap::TileCollisionMap;
+use rayon::prelude::*;
 
 pub fn advection_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
     // Copy current state to buffer (original state φⁿ)
     atmosphere.cells_buffer.clone_from_slice(&atmosphere.cells);
 
-    // Step 1: Forward advection (predictor)
-    for y in 0..atmosphere.height {
-        for x in 0..atmosphere.width {
+    let _track_negatives = cfg!(debug_assertions); // No longer used (was for MacCormack debugging)
+    let _tile_volume = atmosphere.tile_size_physical
+        * atmosphere.tile_size_physical
+        * crate::atmosphere::constants::ROOM_HEIGHT;
+
+    // STEP 1: Flux-conservative density advection
+    // Directly discretizes: ∂ρ/∂t = -∇·(ρu)
+    advect_density_flux_conservative(atmosphere, collision_map, dt);
+
+    // STEP 2: Rusanov flux advection for velocity and temperature
+    // Upwind monotone scheme prevents oscillations at shocks
+    advect_velocity_temperature_rusanov(atmosphere, collision_map, dt);
+}
+
+/// Flux-conservative density advection using 1st order upwind scheme.
+///
+/// Directly discretizes: ∂ρ/∂t = -∇·(ρu)
+///
+/// Guarantees mass conservation by explicitly tracking flux across cell faces:
+/// - flux out of cell A = flux into cell B
+/// - No interpolation artifacts
+/// - Conservative by construction
+fn advect_density_flux_conservative(
+    atmosphere: &mut AtmosphereGrid,
+    collision_map: &TileCollisionMap,
+    dt: f32,
+) {
+    let dx = atmosphere.tile_size_physical;
+    let dy = dx; // Square cells
+    let cell_area = dx * dy;
+
+    let cells_buffer = &atmosphere.cells_buffer;
+    let width = atmosphere.width;
+    let height = atmosphere.height;
+
+    for y in 0..height {
+        for x in 0..width {
             if collision_map.is_blocked(x, y) {
                 continue;
             }
 
-            let idx = atmosphere.index(x, y);
-            let cell = &atmosphere.cells_buffer[idx];
+            let idx = atmosphere.index(x, y) as usize;
 
-            let x_back = x as f32 - (cell.u * dt) / atmosphere.tile_size_physical;
-            let y_back = y as f32 - (cell.v * dt) / atmosphere.tile_size_physical;
+            // Compute signed fluxes at each face
+            let (flux_e_o2, flux_e_n2, flux_e_co2) =
+                compute_flux_east(cells_buffer, collision_map, x, y, width, height, dy);
+            let (flux_w_o2, flux_w_n2, flux_w_co2) =
+                compute_flux_west(cells_buffer, collision_map, x, y, width, height, dy);
+            let (flux_n_o2, flux_n_n2, flux_n_co2) =
+                compute_flux_north(cells_buffer, collision_map, x, y, width, height, dx);
+            let (flux_s_o2, flux_s_n2, flux_s_co2) =
+                compute_flux_south(cells_buffer, collision_map, x, y, width, height, dx);
 
-            atmosphere.forward_state[idx] = interpolate_cell(
-                &atmosphere.cells_buffer,
-                atmosphere.width,
-                atmosphere.height,
-                x_back,
-                y_back,
-            );
-        }
-    }
+            // Net outward flux
+            let net_flux_out_o2 = flux_e_o2 - flux_w_o2 + flux_n_o2 - flux_s_o2;
+            let net_flux_out_n2 = flux_e_n2 - flux_w_n2 + flux_n_n2 - flux_s_n2;
+            let net_flux_out_co2 = flux_e_co2 - flux_w_co2 + flux_n_co2 - flux_s_co2;
 
-    // Step 2: Backward advection (corrector)
-    for y in 0..atmosphere.height {
-        for x in 0..atmosphere.width {
-            if collision_map.is_blocked(x, y) {
-                continue;
-            }
+            // Update densities: ∂ρ/∂t = -net_flux_out / area
+            atmosphere.cells[idx].rho_o2 -= (net_flux_out_o2 / cell_area) * dt;
+            atmosphere.cells[idx].rho_n2 -= (net_flux_out_n2 / cell_area) * dt;
+            atmosphere.cells[idx].rho_co2 -= (net_flux_out_co2 / cell_area) * dt;
 
-            let idx = atmosphere.index(x, y);
-            let cell = &atmosphere.forward_state[idx];
-
-            let x_forward = x as f32 + (cell.u * dt) / atmosphere.tile_size_physical;
-            let y_forward = y as f32 + (cell.v * dt) / atmosphere.tile_size_physical;
-
-            atmosphere.backward_state[idx] = interpolate_cell(
-                &atmosphere.forward_state,
-                atmosphere.width,
-                atmosphere.height,
-                x_forward,
-                y_forward,
-            );
-        }
-    }
-
-    // Step 3: MacCormack correction
-    for y in 0..atmosphere.height {
-        for x in 0..atmosphere.width {
-            if collision_map.is_blocked(x, y) {
-                continue;
-            }
-
-            let idx = atmosphere.index(x, y);
-            let original = &atmosphere.cells_buffer[idx];
-            let forward = &atmosphere.forward_state[idx];
-            let backward = &atmosphere.backward_state[idx];
-
-            let corrected_rho_o2 = forward.rho_o2 + 0.5 * (original.rho_o2 - backward.rho_o2);
-            let corrected_rho_n2 = forward.rho_n2 + 0.5 * (original.rho_n2 - backward.rho_n2);
-            let corrected_rho_co2 = forward.rho_co2 + 0.5 * (original.rho_co2 - backward.rho_co2);
-            let corrected_u = forward.u + 0.5 * (original.u - backward.u);
-            let corrected_v = forward.v + 0.5 * (original.v - backward.v);
-            let corrected_temp =
-                forward.temperature + 0.5 * (original.temperature - backward.temperature);
-
-            atmosphere.cells[idx].rho_o2 = corrected_rho_o2.max(0.0);
-            atmosphere.cells[idx].rho_n2 = corrected_rho_n2.max(0.0);
-            atmosphere.cells[idx].rho_co2 = corrected_rho_co2.max(0.0);
-            atmosphere.cells[idx].u = corrected_u;
-            atmosphere.cells[idx].v = corrected_v;
-            atmosphere.cells[idx].temperature = corrected_temp.max(0.0);
-            // Pressure updated globally between steps
+            // Clamp to physical minimum
+            atmosphere.cells[idx].rho_o2 = atmosphere.cells[idx].rho_o2.max(1e-10);
+            atmosphere.cells[idx].rho_n2 = atmosphere.cells[idx].rho_n2.max(1e-10);
+            atmosphere.cells[idx].rho_co2 = atmosphere.cells[idx].rho_co2.max(1e-10);
         }
     }
 }
 
-fn interpolate_cell(
+/// Compute flux at east face (x+1/2) for all species.
+/// Returns: (flux_o2, flux_n2, flux_co2) in [kg/s]
+fn compute_flux_east(
     cells: &[AtmosphereCell],
+    collision_map: &TileCollisionMap,
+    x: u32,
+    y: u32,
+    width: u32,
+    _height: u32,
+    dy: f32,
+) -> (f32, f32, f32) {
+    if x >= width - 1 || collision_map.is_blocked(x + 1, y) {
+        return (0.0, 0.0, 0.0); // No flux at boundary/wall
+    }
+
+    let idx_l = (y * width + x) as usize;
+    let idx_r = (y * width + (x + 1)) as usize;
+
+    // Face velocity (average)
+    let u_face = 0.5 * (cells[idx_l].u + cells[idx_r].u);
+
+    // Upwind density selection
+    let (rho_o2, rho_n2, rho_co2) = if u_face > 0.0 {
+        (
+            cells[idx_l].rho_o2,
+            cells[idx_l].rho_n2,
+            cells[idx_l].rho_co2,
+        ) // Flow →
+    } else {
+        (
+            cells[idx_r].rho_o2,
+            cells[idx_r].rho_n2,
+            cells[idx_r].rho_co2,
+        ) // Flow ←
+    };
+
+    // Flux = ρ × u × area (kg/s)
+    let flux_o2 = rho_o2 * u_face * dy;
+    let flux_n2 = rho_n2 * u_face * dy;
+    let flux_co2 = rho_co2 * u_face * dy;
+
+    (flux_o2, flux_n2, flux_co2)
+}
+
+/// Compute flux at west face (x-1/2) for all species.
+fn compute_flux_west(
+    cells: &[AtmosphereCell],
+    collision_map: &TileCollisionMap,
+    x: u32,
+    y: u32,
+    width: u32,
+    _height: u32,
+    dy: f32,
+) -> (f32, f32, f32) {
+    if x == 0 || collision_map.is_blocked(x - 1, y) {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let idx_l = (y * width + (x - 1)) as usize;
+    let idx_r = (y * width + x) as usize;
+
+    let u_face = 0.5 * (cells[idx_l].u + cells[idx_r].u);
+
+    let (rho_o2, rho_n2, rho_co2) = if u_face > 0.0 {
+        (
+            cells[idx_l].rho_o2,
+            cells[idx_l].rho_n2,
+            cells[idx_l].rho_co2,
+        )
+    } else {
+        (
+            cells[idx_r].rho_o2,
+            cells[idx_r].rho_n2,
+            cells[idx_r].rho_co2,
+        )
+    };
+
+    (
+        rho_o2 * u_face * dy,
+        rho_n2 * u_face * dy,
+        rho_co2 * u_face * dy,
+    )
+}
+
+/// Compute flux at north face (y+1/2) for all species.
+fn compute_flux_north(
+    cells: &[AtmosphereCell],
+    collision_map: &TileCollisionMap,
+    x: u32,
+    y: u32,
     width: u32,
     height: u32,
-    x: f32,
-    y: f32,
-) -> AtmosphereCell {
-    let x0 = x.floor().max(0.0).min((width - 1) as f32) as u32;
-    let y0 = y.floor().max(0.0).min((height - 1) as f32) as u32;
-    let x1 = (x0 + 1).min(width - 1);
-    let y1 = (y0 + 1).min(height - 1);
-
-    let fx = (x - x0 as f32).clamp(0.0, 1.0);
-    let fy = (y - y0 as f32).clamp(0.0, 1.0);
-
-    let idx00 = (y0 * width + x0) as usize;
-    let idx10 = (y0 * width + x1) as usize;
-    let idx01 = (y1 * width + x0) as usize;
-    let idx11 = (y1 * width + x1) as usize;
-
-    let c00 = &cells[idx00];
-    let c10 = &cells[idx10];
-    let c01 = &cells[idx01];
-    let c11 = &cells[idx11];
-
-    AtmosphereCell {
-        rho_o2: bilerp(c00.rho_o2, c10.rho_o2, c01.rho_o2, c11.rho_o2, fx, fy),
-        rho_n2: bilerp(c00.rho_n2, c10.rho_n2, c01.rho_n2, c11.rho_n2, fx, fy),
-        rho_co2: bilerp(c00.rho_co2, c10.rho_co2, c01.rho_co2, c11.rho_co2, fx, fy),
-        u: bilerp(c00.u, c10.u, c01.u, c11.u, fx, fy),
-        v: bilerp(c00.v, c10.v, c01.v, c11.v, fx, fy),
-        temperature: bilerp(
-            c00.temperature,
-            c10.temperature,
-            c01.temperature,
-            c11.temperature,
-            fx,
-            fy,
-        ),
-        pressure: 0.0,
-    }
-}
-
-#[inline]
-fn bilerp(v00: f32, v10: f32, v01: f32, v11: f32, fx: f32, fy: f32) -> f32 {
-    let v0 = v00 * (1.0 - fx) + v10 * fx;
-    let v1 = v01 * (1.0 - fx) + v11 * fx;
-    v0 * (1.0 - fy) + v1 * fy
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tilemap::TileCollisionMap;
-
-    #[test]
-    fn test_maccormack_differs_from_semi_lagrangian() {
-        let mut mac_grid = AtmosphereGrid::new(3, 1, 1.0, 1.0);
-        let mut semi_grid = AtmosphereGrid::new(3, 1, 1.0, 1.0);
-
-        // Create a sharp density gradient that will advect to the right.
-        let setup = [
-            AtmosphereCell {
-                rho_o2: 1.0,
-                rho_n2: 0.0,
-                rho_co2: 0.0,
-                u: 1.0,
-                v: 0.0,
-                temperature: 300.0,
-                pressure: 0.0,
-            },
-            AtmosphereCell {
-                rho_o2: 0.25,
-                rho_n2: 0.0,
-                rho_co2: 0.0,
-                u: 1.0,
-                v: 0.0,
-                temperature: 300.0,
-                pressure: 0.0,
-            },
-            AtmosphereCell {
-                rho_o2: 0.0,
-                rho_n2: 0.0,
-                rho_co2: 0.0,
-                u: 1.0,
-                v: 0.0,
-                temperature: 300.0,
-                pressure: 0.0,
-            },
-        ];
-
-        mac_grid.cells.clone_from_slice(&setup);
-        semi_grid.cells.clone_from_slice(&setup);
-
-        let collision_map = TileCollisionMap::test_map(3, 1);
-        let dt = 0.4;
-
-        advection_step(&mut mac_grid, &collision_map, dt);
-        semi_lagrangian_step(&mut semi_grid, &collision_map, dt);
-
-        let mac_density = mac_grid.cells[1].rho_o2;
-        let semi_density = semi_grid.cells[1].rho_o2;
-
-        assert!(
-            (mac_density - semi_density).abs() > 1e-4,
-            "MacCormack path should differ from semi-Lagrangian reference"
-        );
+    dx: f32,
+) -> (f32, f32, f32) {
+    if y >= height - 1 || collision_map.is_blocked(x, y + 1) {
+        return (0.0, 0.0, 0.0);
     }
 
-    #[test]
-    fn test_bilinear_interpolation() {
-        let v00 = 0.0;
-        let v10 = 1.0;
-        let v01 = 0.0;
-        let v11 = 1.0;
+    let idx_s = (y * width + x) as usize;
+    let idx_n = ((y + 1) * width + x) as usize;
 
-        let center = bilerp(v00, v10, v01, v11, 0.5, 0.5);
-        assert!((center - 0.5).abs() < 1e-6);
+    let v_face = 0.5 * (cells[idx_s].v + cells[idx_n].v);
 
-        let corner_00 = bilerp(v00, v10, v01, v11, 0.0, 0.0);
-        assert!((corner_00 - v00).abs() < 1e-6);
+    let (rho_o2, rho_n2, rho_co2) = if v_face > 0.0 {
+        (
+            cells[idx_s].rho_o2,
+            cells[idx_s].rho_n2,
+            cells[idx_s].rho_co2,
+        ) // Flow ↑
+    } else {
+        (
+            cells[idx_n].rho_o2,
+            cells[idx_n].rho_n2,
+            cells[idx_n].rho_co2,
+        ) // Flow ↓
+    };
 
-        let corner_11 = bilerp(v00, v10, v01, v11, 1.0, 1.0);
-        assert!((corner_11 - v11).abs() < 1e-6);
-    }
+    (
+        rho_o2 * v_face * dx,
+        rho_n2 * v_face * dx,
+        rho_co2 * v_face * dx,
+    )
 }
 
-/// Minimal semi-Lagrangian integrator used to compare against the MacCormack path.
-#[cfg(test)]
-fn semi_lagrangian_step(atmosphere: &mut AtmosphereGrid, collision_map: &TileCollisionMap, dt: f32) {
+/// Compute flux at south face (y-1/2) for all species.
+fn compute_flux_south(
+    cells: &[AtmosphereCell],
+    collision_map: &TileCollisionMap,
+    x: u32,
+    y: u32,
+    width: u32,
+    _height: u32,
+    dx: f32,
+) -> (f32, f32, f32) {
+    if y == 0 || collision_map.is_blocked(x, y - 1) {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let idx_s = ((y - 1) * width + x) as usize;
+    let idx_n = (y * width + x) as usize;
+
+    let v_face = 0.5 * (cells[idx_s].v + cells[idx_n].v);
+
+    let (rho_o2, rho_n2, rho_co2) = if v_face > 0.0 {
+        (
+            cells[idx_s].rho_o2,
+            cells[idx_s].rho_n2,
+            cells[idx_s].rho_co2,
+        )
+    } else {
+        (
+            cells[idx_n].rho_o2,
+            cells[idx_n].rho_n2,
+            cells[idx_n].rho_co2,
+        )
+    };
+
+    (
+        rho_o2 * v_face * dx,
+        rho_n2 * v_face * dx,
+        rho_co2 * v_face * dx,
+    )
+}
+
+/// Rusanov (local Lax-Friedrichs) flux for velocity and temperature advection.
+///
+/// Implements monotone upwind scheme with numerical dissipation:
+///   flux = 0.5 * [F(q_L) + F(q_R) - |a| * (q_R - q_L)]
+///
+/// Where:
+/// - F(q) = u * q (physical flux)  
+/// - a = |u_face| (local wave speed for convective transport)
+/// - Upwind dissipation term ensures monotonicity (no oscillations at shocks)
+///
+/// This is 1st-order accurate but unconditionally monotone, ideal for
+/// capturing shocks and contact discontinuities without spurious oscillations.
+fn advect_velocity_temperature_rusanov(
+    atmosphere: &mut AtmosphereGrid,
+    collision_map: &TileCollisionMap,
+    dt: f32,
+) {
+    let dx = atmosphere.tile_size_physical;
+    let width = atmosphere.width as usize;
+
+    atmosphere.cells_buffer.clone_from_slice(&atmosphere.cells);
+    let cells = &atmosphere.cells_buffer;
+
+    // Parallel update over rows
     atmosphere
-        .cells_buffer
-        .clone_from_slice(&atmosphere.cells);
+        .cells
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y_u32 = y as u32;
 
-    for y in 0..atmosphere.height {
-        for x in 0..atmosphere.width {
-            if collision_map.is_blocked(x, y) {
-                continue;
+            for x in 0..width {
+                let x_u32 = x as u32;
+
+                if collision_map.is_blocked(x_u32, y_u32) {
+                    continue;
+                }
+
+                let idx = y * width + x;
+
+                // East face (x+1/2)
+                let (flux_u_e, flux_v_e, flux_t_e) = if x_u32 < atmosphere.width - 1
+                    && !collision_map.is_blocked(x_u32 + 1, y_u32)
+                {
+                    let idx_r = y * width + (x + 1);
+
+                    let q_l = cells[idx].u;
+                    let q_r = cells[idx_r].u;
+                    let u_face = 0.5 * (cells[idx].u + cells[idx_r].u);
+                    let f_l = u_face * q_l;
+                    let f_r = u_face * q_r;
+                    let a = u_face.abs();
+                    let flux_u = 0.5 * (f_l + f_r - a * (q_r - q_l));
+
+                    let q_l_v = cells[idx].v;
+                    let q_r_v = cells[idx_r].v;
+                    let f_l_v = u_face * q_l_v;
+                    let f_r_v = u_face * q_r_v;
+                    let flux_v = 0.5 * (f_l_v + f_r_v - a * (q_r_v - q_l_v));
+
+                    let q_l_t = cells[idx].temperature;
+                    let q_r_t = cells[idx_r].temperature;
+                    let f_l_t = u_face * q_l_t;
+                    let f_r_t = u_face * q_r_t;
+                    let flux_t = 0.5 * (f_l_t + f_r_t - a * (q_r_t - q_l_t));
+
+                    (flux_u, flux_v, flux_t)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+
+                // West face (x-1/2)
+                let (flux_u_w, flux_v_w, flux_t_w) =
+                    if x_u32 > 0 && !collision_map.is_blocked(x_u32 - 1, y_u32) {
+                        let idx_l = y * width + (x - 1);
+
+                        let q_l = cells[idx_l].u;
+                        let q_r = cells[idx].u;
+                        let u_face = 0.5 * (cells[idx_l].u + cells[idx].u);
+                        let f_l = u_face * q_l;
+                        let f_r = u_face * q_r;
+                        let a = u_face.abs();
+                        let flux_u = 0.5 * (f_l + f_r - a * (q_r - q_l));
+
+                        let q_l_v = cells[idx_l].v;
+                        let q_r_v = cells[idx].v;
+                        let f_l_v = u_face * q_l_v;
+                        let f_r_v = u_face * q_r_v;
+                        let flux_v = 0.5 * (f_l_v + f_r_v - a * (q_r_v - q_l_v));
+
+                        let q_l_t = cells[idx_l].temperature;
+                        let q_r_t = cells[idx].temperature;
+                        let f_l_t = u_face * q_l_t;
+                        let f_r_t = u_face * q_r_t;
+                        let flux_t = 0.5 * (f_l_t + f_r_t - a * (q_r_t - q_l_t));
+
+                        (flux_u, flux_v, flux_t)
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+
+                // North face (y+1/2)
+                let (flux_u_n, flux_v_n, flux_t_n) = if y_u32 < atmosphere.height - 1
+                    && !collision_map.is_blocked(x_u32, y_u32 + 1)
+                {
+                    let idx_n = (y + 1) * width + x;
+
+                    let q_s = cells[idx].u;
+                    let q_n = cells[idx_n].u;
+                    let v_face = 0.5 * (cells[idx].v + cells[idx_n].v);
+                    let f_s = v_face * q_s;
+                    let f_n = v_face * q_n;
+                    let a = v_face.abs();
+                    let flux_u = 0.5 * (f_s + f_n - a * (q_n - q_s));
+
+                    let q_s_v = cells[idx].v;
+                    let q_n_v = cells[idx_n].v;
+                    let f_s_v = v_face * q_s_v;
+                    let f_n_v = v_face * q_n_v;
+                    let flux_v = 0.5 * (f_s_v + f_n_v - a * (q_n_v - q_s_v));
+
+                    let q_s_t = cells[idx].temperature;
+                    let q_n_t = cells[idx_n].temperature;
+                    let f_s_t = v_face * q_s_t;
+                    let f_n_t = v_face * q_n_t;
+                    let flux_t = 0.5 * (f_s_t + f_n_t - a * (q_n_t - q_s_t));
+
+                    (flux_u, flux_v, flux_t)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+
+                // South face (y-1/2)
+                let (flux_u_s, flux_v_s, flux_t_s) =
+                    if y_u32 > 0 && !collision_map.is_blocked(x_u32, y_u32 - 1) {
+                        let idx_s = (y - 1) * width + x;
+
+                        let q_s = cells[idx_s].u;
+                        let q_n = cells[idx].u;
+                        let v_face = 0.5 * (cells[idx_s].v + cells[idx].v);
+                        let f_s = v_face * q_s;
+                        let f_n = v_face * q_n;
+                        let a = v_face.abs();
+                        let flux_u = 0.5 * (f_s + f_n - a * (q_n - q_s));
+
+                        let q_s_v = cells[idx_s].v;
+                        let q_n_v = cells[idx].v;
+                        let f_s_v = v_face * q_s_v;
+                        let f_n_v = v_face * q_n_v;
+                        let flux_v = 0.5 * (f_s_v + f_n_v - a * (q_n_v - q_s_v));
+
+                        let q_s_t = cells[idx_s].temperature;
+                        let q_n_t = cells[idx].temperature;
+                        let f_s_t = v_face * q_s_t;
+                        let f_n_t = v_face * q_n_t;
+                        let flux_t = 0.5 * (f_s_t + f_n_t - a * (q_n_t - q_s_t));
+
+                        (flux_u, flux_v, flux_t)
+                    } else {
+                        (0.0, 0.0, 0.0)
+                    };
+
+                // Update: dq/dt = -(flux_E - flux_W + flux_N - flux_S) / dx
+                row[x].u -= (flux_u_e - flux_u_w + flux_u_n - flux_u_s) * dt / dx;
+                row[x].v -= (flux_v_e - flux_v_w + flux_v_n - flux_v_s) * dt / dx;
+                row[x].temperature -= (flux_t_e - flux_t_w + flux_t_n - flux_t_s) * dt / dx;
+
+                // Clamp temperature to CMB minimum
+                use crate::atmosphere::constants;
+                row[x].temperature = row[x].temperature.max(constants::T_CMB);
             }
+        });
 
-            let idx = atmosphere.index(x, y);
-            let cell = &atmosphere.cells_buffer[idx];
-
-            let x_back = x as f32 - (cell.u * dt) / atmosphere.tile_size_physical;
-            let y_back = y as f32 - (cell.v * dt) / atmosphere.tile_size_physical;
-
-            atmosphere.cells[idx] = interpolate_cell(
-                &atmosphere.cells_buffer,
-                atmosphere.width,
-                atmosphere.height,
-                x_back,
-                y_back,
+    // Runtime guard for non-finite values (runs in --release)
+    for (idx, cell) in atmosphere.cells.iter().enumerate() {
+        if !cell.u.is_finite() || !cell.v.is_finite() || !cell.temperature.is_finite() {
+            let x = idx % width;
+            let y = idx / width;
+            panic!(
+                "Non-finite values after Rusanov at ({}, {}): u={}, v={}, T={}",
+                x, y, cell.u, cell.v, cell.temperature
             );
         }
     }

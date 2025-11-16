@@ -1,18 +1,19 @@
-# Space Station Atmospheric Simulation
+# Space-Sim Atmosphere Prototype
 
-A 2D fluid dynamics physics simulation built with Bevy 0.15, featuring realistic atmospheric modeling with compressible Navier-Stokes fluid dynamics. The project simulates O₂/N₂/CO₂ gas diffusion, pressure dynamics, player respiration, and life support systems with forced convection on an accelerated timescale. This repository is a simulation testbed rather than a traditional game.
+This repo contains a Bevy-based research prototype that simulates a 2D cross-section of a space-station atmosphere. The focus is rapid iteration on grid-based fluid steps (advection, diffusion, compression heating) plus supporting systems such as life-support sources, respiration sinks, diagnostics, and CSV logging. Earlier pressure-flux and Poisson projection experiments were removed from the live loop, so the current build reflects only the components present under `src/atmosphere/simulation.rs`.
+
+## Project Layout
+
+| Path | Purpose |
+| --- | --- |
+| `src/main.rs`, `src/lib.rs` | Game entry point and Bevy app wiring |
+| `src/atmosphere/` | Grid, constants, diagnostics, monitoring, CSV export, and the active steps (advection, diffusion, compression) |
+| `src/tilemap.rs`, `src/player.rs`, `src/animation.rs` | World representation, player hooks, camera/UX logic |
+| `tests/` | Integration/regression tests for atmosphere subsystems |
+| `assets/` | Scenes, textures, and tuning data loaded at runtime |
+| `docs/` | Research logs explaining removed pressure-flux/projection work and known limitations |
 
 ## Feature Overview
-
-### Atmospheric Physics
-- **Compressible Navier-Stokes simulation** with operator splitting (advection, diffusion, pressure correction)
-- **Multi-gas tracking**: Oxygen (O₂), Nitrogen (N₂), and Carbon Dioxide (CO₂) with separate density fields
-- **Gas diffusion** with Fick's law and realistic diffusion coefficients
-- **Pressure dynamics** computed from ideal gas law: p = (ρ_O₂/M_O₂ + ρ_N₂/M_N₂ + ρ_CO₂/M_CO₂) × R × T
-- **Temperature simulation** with thermal diffusion
-- **CFL-stable timestep** sub-stepping for numerical stability
-- **Life support systems** with forced convection fans creating swirl patterns for gas mixing
-- **Player respiration** consuming O₂ and producing CO₂ at realistic rates
 
 ### Rendering Engine Systems
 - **8-directional character movement** with normalized diagonal speed and per-axis collision
@@ -21,73 +22,34 @@ A 2D fluid dynamics physics simulation built with Bevy 0.15, featuring realistic
 - **Character sprite rotation** for 8 compass directions
 - **Real-time visualization** (press V): Pressure, temperature, O₂, N₂, CO₂, breathability, and velocity fields
 
-## Technology Stack
-- [Bevy v0.15](https://docs.rs/bevy/0.15.0/bevy/) – ECS game engine providing rendering, input, and scheduling
-- [bevy_ecs_tilemap v0.15](https://docs.rs/bevy_ecs_tilemap/0.15.0/bevy_ecs_tilemap/) – GPU-accelerated tilemap renderer
-- Rust – Safe systems language for deterministic physics simulation
+## Current Simulation Pipeline
 
-## Getting Started
+Each frame is subdivided by CFL constraints (`simulate_atmosphere`):
 
-### Prerequisites
-1. Install Rust stable toolchain via `rustup`
-2. Ensure `cargo` is on your PATH
+1. **Flux-Conservative Advection** (`steps/advection.rs`) – mass-conserving density transport plus MacCormack velocity/temperature advection.
+2. **Explicit Diffusion** (`steps/diffusion.rs`) – viscosity, thermal diffusion, and scalar mixing, respecting tile collisions.
+3. **Compression Heating** (`steps/compression.rs`) – applies ∂T/∂t = -(γ-1)T∇·u using the current divergence field.
+4. **Pressure Update** (`simulation::update_grid_pressures`) – recomputes ideal-gas pressures for diagnostics and source terms.
 
-### Installation
-Clone the repository - no additional dependencies required (Bevy bundles rendering backends).
+Pressure-driven flux and Poisson pressure projection are *not* wired in; any mention of them in historical docs refers to deprecated code paths. Mass equalization presently occurs only through advection/diffusion and source terms, so expect lingering pressure gradients in longer runs.
 
-## Running the Simulation
+## Build & Run
 
-Development build (faster compile, optimized dependencies):
 ```bash
-cargo run
+cargo check            # Fast type/build check
+cargo test             # Run unit + integration tests (including diagnostics)
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+cargo run              # Launches the simulation (use --release when profiling)
 ```
 
-Release build (optimized simulation performance):
-```bash
-cargo run --release
-```
+The project targets Rust 1.75+ and Bevy 0.17. Assets assume X11 by default (`bevy_winit` feature is enabled in Cargo.toml).
 
-## Controls
-- `W` / `A` / `S` / `D` – Move (8-directional with diagonals)
-- `V` – Toggle atmosphere visualization (cycles breathability overlay on/off)
+## Testing & Diagnostics
 
-## Project Structure
-```
-space-sim/
-├── assets/
-│   ├── maps/
-│   │   └── untitled_map.json       # Tile layout with '3' marking life support units
-│   └── sprites/
-│       ├── characters/
-│       │   └── rotations/          # 8-directional character sprites
-│       ├── tiles/
-│       │   └── metal_floor_tileset.png  # 32×32 Wang tileset
-│       └── life_support.png
-├── src/
-│   ├── animation.rs                # Character sprite rotation system
-│   ├── atmosphere/                 # Atmospheric simulation modules
-│   │   ├── constants.rs            # Physical/tuning constants
-│   │   ├── grid.rs                 # Atmosphere grid resource & cell definitions
-│   │   ├── monitoring.rs           # Mass/divergence trackers
-│   │   ├── sources.rs              # Life support & respiration systems
-│   │   ├── steps/                  # CFD operator implementations
-│   │   │   ├── advection.rs
-│   │   │   ├── diffusion.rs
-│   │   │   ├── pressure_flux.rs
-│   │   │   └── pressure_projection.rs
-│   │   ├── debug.rs                # Visualization helpers
-│   │   ├── plugin.rs               # Bevy plugin + schedule wiring
-│   │   └── simulation.rs           # Frame orchestration
-│   ├── camera.rs                   # Smooth camera follow
-│   ├── debug.rs                    # Pressure logger
-│   ├── main.rs                     # Plugin registration
-│   ├── player.rs                   # Movement and collision
-│   └── tilemap.rs                  # Map loading and collision grid
-├── Cargo.toml
-└── README.md
-```
-
-## Architecture Overview
+- Unit tests live next to their modules; integration suites run from `tests/`.
+- Diagnostics (`src/atmosphere/diagnostics.rs`) track mass, divergence, and conservation errors; CSV exports land under `.debug/diagnostics/`.
+- When validating numerical changes, attach relevant CSV snippets or log excerpts to commits/PRs so reviewers can compare against prior runs.
 
 ### Atmospheric Simulation Pipeline
 The atmosphere plugin orchestrates a four-step CFD loop each frame:
@@ -103,8 +65,7 @@ The atmosphere plugin orchestrates a four-step CFD loop each frame:
 5. **Fluid dynamics simulation** (`steps/`):
    - **Advection** (`steps/advection.rs`): MacCormack transport of density, momentum, and temperature
    - **Diffusion** (`steps/diffusion.rs`): Viscous and scalar diffusion
-   - **Pressure-driven flux** (`steps/pressure_flux.rs`): Mass exchange along pressure gradients with momentum transfer
-   - **Pressure projection** (`steps/pressure_projection.rs`): Enforces near-zero velocity divergence
+   - **Compression Heating** (`steps/compression.rs`): Temperature changes from velocity divergence
 
 ### Collision System
 The `TileCollisionMap` (src/tilemap.rs:14-68) separates rendering from gameplay:
@@ -181,7 +142,11 @@ This is a **physics simulation testbed** on an accelerated timescale. The goal i
 - HVAC duct networks for explicit air routing
 - Hypoxia/hypercapnia player status effects
 
-## Contribution Guidelines
+## Contributing
+
+See `CONTRIBUTING.md` for development workflow, commit conventions, and code standards. When touching atmosphere constants or solver logic, cross-reference the relevant doc in `docs/` and update it so the README stays aligned with the actual implementation.
+
+Key guidelines:
 - Keep physics constants in `atmosphere/constants.rs`
 - Document units in comments (kg, m, s, Pa, K)
 - Test with visualization overlay (V key) to verify gas behavior

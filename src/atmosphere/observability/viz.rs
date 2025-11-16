@@ -18,7 +18,7 @@ pub enum VisualizationMode {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct VisualizationState {
+pub struct VisualizationState {
     heatmap_enabled: bool,
     arrows_enabled: bool,
 }

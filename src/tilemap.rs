@@ -66,14 +66,26 @@ impl TileCollisionMap {
             .unwrap_or(true)
     }
 
+    /// Create a test collision map with all tiles unblocked (for testing).
     #[cfg(test)]
-    /// Create a test collision map with all tiles unblocked.
     pub fn test_map(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
             origin: Vec2::ZERO,
             tile_size: Vec2::new(1.0, 1.0),
+            blocked: vec![false; (width * height) as usize],
+        }
+    }
+
+    /// Create an empty collision map with specified dimensions and transform.
+    #[allow(dead_code)]
+    pub fn empty(width: u32, height: u32, tile_size: Vec2, origin: Vec2) -> Self {
+        Self {
+            width,
+            height,
+            origin,
+            tile_size,
             blocked: vec![false; (width * height) as usize],
         }
     }

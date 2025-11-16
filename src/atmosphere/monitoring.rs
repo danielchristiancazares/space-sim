@@ -15,6 +15,23 @@ pub struct DivergenceTracker {
     pub time_since_check: f32,
 }
 
+#[derive(Resource)]
+pub struct MomentumTracker {
+    pub last_momentum_x: f32,
+    pub last_momentum_y: f32,
+    pub time_since_check: f32,
+}
+
+impl Default for MomentumTracker {
+    fn default() -> Self {
+        Self {
+            last_momentum_x: 0.0,
+            last_momentum_y: 0.0,
+            time_since_check: 0.0,
+        }
+    }
+}
+
 pub fn check_mass_conservation(
     atmosphere: Res<AtmosphereGrid>,
     mut tracker: ResMut<MassTracker>,
@@ -135,10 +152,65 @@ pub fn monitor_divergence(
 
     if max_divergence > 1.0 {
         warn!(
-            "High velocity divergence detected: {:.3} s⁻¹ (pressure projection may need tuning)",
+            "High velocity divergence: {:.3} s⁻¹ (compressible flow transient; \
+             may indicate shock, expansion wave, or CFL violation if sustained)",
             max_divergence
         );
     }
 
+    tracker.time_since_check = 0.0;
+}
+
+pub fn check_momentum_conservation(
+    atmosphere: Res<AtmosphereGrid>,
+    collision_map: Res<TileCollisionMap>,
+    mut tracker: ResMut<MomentumTracker>,
+    time: Res<Time>,
+) {
+    tracker.time_since_check += time.delta_secs();
+
+    if tracker.time_since_check < constants::MASS_CHECK_INTERVAL {
+        return;
+    }
+
+    let tile_volume =
+        atmosphere.tile_size_physical * atmosphere.tile_size_physical * constants::ROOM_HEIGHT;
+
+    let mut total_momentum_x = 0.0;
+    let mut total_momentum_y = 0.0;
+
+    for y in 0..atmosphere.height {
+        for x in 0..atmosphere.width {
+            if collision_map.is_blocked(x, y) {
+                continue;
+            }
+
+            let idx = atmosphere.index(x, y);
+            let cell = &atmosphere.cells[idx];
+            let mass = cell.total_density() * tile_volume;
+
+            total_momentum_x += mass * cell.u;
+            total_momentum_y += mass * cell.v;
+        }
+    }
+
+    if tracker.last_momentum_x.abs() > f32::EPSILON || tracker.last_momentum_y.abs() > f32::EPSILON
+    {
+        let delta_x = total_momentum_x - tracker.last_momentum_x;
+        let delta_y = total_momentum_y - tracker.last_momentum_y;
+        let delta_magnitude = (delta_x * delta_x + delta_y * delta_y).sqrt();
+
+        // Momentum can change due to pressure forces and boundary interactions,
+        // but large systematic drift may indicate numerical issues
+        if delta_magnitude > 10.0 {
+            debug!(
+                "Momentum change: Δp = ({:.3}, {:.3}) kg·m/s (magnitude: {:.3})",
+                delta_x, delta_y, delta_magnitude
+            );
+        }
+    }
+
+    tracker.last_momentum_x = total_momentum_x;
+    tracker.last_momentum_y = total_momentum_y;
     tracker.time_since_check = 0.0;
 }

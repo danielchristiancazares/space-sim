@@ -1,13 +1,40 @@
 [package]
-name = "space_station_game"
+name = "fluid_dynamics_research_sim"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.15"
-bevy_ecs_tilemap = "0.15"
+bevy = { version = "0.17.2", default-features = false, features = [
+    "bevy_animation",
+    "bevy_asset",
+    "bevy_audio",
+    "bevy_color",
+    "bevy_core_pipeline",
+    "bevy_gizmos",
+    "bevy_gltf",
+    "bevy_pbr",
+    "bevy_picking",
+    "bevy_render",
+    "bevy_scene",
+    "bevy_sprite",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_winit",
+    "default_font",
+    "hdr",
+    "ktx2",
+    "multi_threaded",
+    "png",
+    "tonemapping_luts",
+    "x11",  # Use X11, not wayland
+    "bevy_gilrs",
+    "vorbis",
+    "zstd_rust",  # Required for image compression
+] }
+bevy_ecs_tilemap = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rayon = "1.11"
 
 # Enable optimizations for dependencies in dev builds
 [profile.dev.package."*"]

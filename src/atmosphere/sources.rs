@@ -1,14 +1,21 @@
 use super::grid::AtmosphereGrid;
-use super::monitoring::MassTracker;
+use super::observability::SimulationDiagnostics;
 use crate::atmosphere::constants;
 use crate::player::Player;
 use crate::tilemap::{LifeSupportTiles, TileCollisionMap};
 use bevy::prelude::*;
 
+#[derive(Resource, Default)]
+pub struct BreathabilityWarningTracker {
+    pub time_since_warning: f32,
+}
+
+const BREATHABILITY_WARNING_INTERVAL: f32 = 5.0;
+
 pub fn life_support_generation(
     mut atmosphere: ResMut<AtmosphereGrid>,
     life_support: Res<LifeSupportTiles>,
-    mut tracker: ResMut<MassTracker>,
+    mut diagnostics: ResMut<SimulationDiagnostics>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
@@ -38,7 +45,7 @@ pub fn life_support_generation(
         }
     }
 
-    tracker.expected_delta += total_generated;
+    diagnostics.expected_mass_delta += total_generated;
 }
 
 pub fn life_support_mixing(
@@ -105,11 +112,12 @@ pub fn life_support_mixing(
 pub fn player_respiration(
     mut atmosphere: ResMut<AtmosphereGrid>,
     collision_map: Res<TileCollisionMap>,
-    mut tracker: ResMut<MassTracker>,
+    mut diagnostics: ResMut<SimulationDiagnostics>,
+    mut warning_tracker: ResMut<BreathabilityWarningTracker>,
     player_query: Query<&Transform, With<Player>>,
     time: Res<Time>,
 ) {
-    let Ok(player_transform) = player_query.get_single() else {
+    let Ok(player_transform) = player_query.single() else {
         return;
     };
 
@@ -137,23 +145,32 @@ pub fn player_respiration(
     cell.update_pressure();
 
     let net_mass_change = co2_produced - o2_consumed;
-    tracker.expected_delta += net_mass_change;
+    diagnostics.expected_mass_delta += net_mass_change;
 
-    let o2_partial_pressure = (cell.rho_o2 / constants::M_O2) * constants::R * cell.temperature;
-    if cell.pressure > 0.0 && o2_partial_pressure < 16000.0 {
-        warn!(
-            "Low oxygen at player location! O2 partial pressure: {:.0} Pa ({:.1}%)",
-            o2_partial_pressure,
-            100.0 * o2_partial_pressure / cell.pressure
-        );
-    }
+    // Only check breathability warnings at intervals to avoid log spam
+    warning_tracker.time_since_warning += dt;
 
-    let co2_partial_pressure = (cell.rho_co2 / constants::M_CO2) * constants::R * cell.temperature;
-    if cell.pressure > 0.0 && co2_partial_pressure > 5000.0 {
-        warn!(
-            "High CO2 at player location! CO2 partial pressure: {:.0} Pa ({:.1}%)",
-            co2_partial_pressure,
-            100.0 * co2_partial_pressure / cell.pressure
-        );
+    if warning_tracker.time_since_warning >= BREATHABILITY_WARNING_INTERVAL {
+        let o2_partial_pressure = (cell.rho_o2 / constants::M_O2) * constants::R * cell.temperature;
+        let co2_partial_pressure =
+            (cell.rho_co2 / constants::M_CO2) * constants::R * cell.temperature;
+
+        if cell.pressure > 0.0 && o2_partial_pressure < 16000.0 {
+            warn!(
+                "Low oxygen at player location! O2 partial pressure: {:.0} Pa ({:.1}%)",
+                o2_partial_pressure,
+                100.0 * o2_partial_pressure / cell.pressure
+            );
+        }
+
+        if cell.pressure > 0.0 && co2_partial_pressure > 5000.0 {
+            warn!(
+                "High CO2 at player location! CO2 partial pressure: {:.0} Pa ({:.1}%)",
+                co2_partial_pressure,
+                100.0 * co2_partial_pressure / cell.pressure
+            );
+        }
+
+        warning_tracker.time_since_warning = 0.0;
     }
 }
