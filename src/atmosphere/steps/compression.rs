@@ -16,6 +16,7 @@ use crate::atmosphere::constants;
 use crate::atmosphere::grid::AtmosphereGrid;
 use crate::tilemap::TileCollisionMap;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Apply compression/expansion heating to temperature field.
 ///
@@ -39,9 +40,13 @@ pub fn compression_heating_step(
     let dx = atmosphere.tile_size_physical;
     let width = atmosphere.width as usize;
 
-    // Physical bounds for temperature
-    const T_MIN: f32 = 2.7; // K (cosmic microwave background)
-    const T_MAX: f32 = 10_000.0; // K (safety cap for numerical stability)
+    // Precompute log limits once (constant across all cells)
+    let max_log_pos = (1.0 + constants::MAX_FRAC_T_PER_STEP_POS).ln(); // ~0.001998
+    let max_log_neg = (1.0 - constants::MAX_FRAC_T_PER_STEP_NEG).ln(); // ~-0.005012
+
+    // Counters for hot-spot brake diagnostics (thread-safe)
+    let hot_zone_entries = AtomicUsize::new(0);
+    let phys_max_caps = AtomicUsize::new(0);
 
     // Buffer current state for divergence calculation
     atmosphere.cells_buffer.clone_from_slice(&atmosphere.cells);
@@ -95,41 +100,80 @@ pub fn compression_heating_step(
                 // ============================================================
                 // Temperature compression: ∂T/∂t = -(γ-1)T∇·u (energy equation)
                 // ============================================================
-                // EXACT EXPONENTIAL UPDATE:
-                // Treating ∇·u as constant over substep, the exact solution is:
+                // EXACT EXPONENTIAL UPDATE with asymmetric clamping and hot-spot brake:
                 //   T(t+dt) = T(t) × exp[-(γ-1) × ∇·u × dt]
                 //
-                // This is mathematically precise and prevents compounding errors.
-                let exponent = -gamma_minus_1 * div_u * dt;
+                // Work in log-space for better numerical control:
+                //   dlogT = -(γ-1) × ∇·u × dt
 
-                // Guard exponent to catch divergence × dt explosions
-                debug_assert!(
-                    exponent.abs() < 10.0,
-                    "Extreme compression exponent at ({}, {}): exp({:.3}) from \
-                     div_u={:.2} s⁻¹, dt={:.4} s (CFL violation likely)",
-                    x_u32,
-                    y_u32,
-                    exponent,
-                    div_u,
-                    dt
-                );
+                // Step 1: Compute raw log-change
+                let dlog_t_raw = -gamma_minus_1 * div_u * dt;
 
-                let factor = exponent.exp();
-                let t_new = t_old * factor;
+                // Step 2: Asymmetric clamp (tight on heating, loose on cooling)
+                let dlog_t_clamped = if dlog_t_raw > 0.0 {
+                    dlog_t_raw.min(max_log_pos) // Heating: limited to +0.2%
+                } else {
+                    dlog_t_raw.max(max_log_neg) // Cooling: limited to -0.5%
+                };
+
+                // Step 3: Hot-spot brake (three-zone system)
+                let dlog_t_final = if t_old < constants::T_HOT {
+                    // Zone 1: Below T_HOT - full compression heating
+                    dlog_t_clamped
+                } else if t_old < constants::T_PHYS_MAX {
+                    // Zone 2: T_HOT to T_PHYS_MAX - linear taper to zero
+                    let scale = (constants::T_PHYS_MAX - t_old) / (constants::T_PHYS_MAX - constants::T_HOT);
+
+                    // Track first entry into hot zone
+                    if t_old >= constants::T_HOT && t_old - dlog_t_clamped.abs() * t_old < constants::T_HOT {
+                        hot_zone_entries.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    if dlog_t_clamped > 0.0 {
+                        // Only taper heating, not cooling
+                        dlog_t_clamped * scale
+                    } else {
+                        dlog_t_clamped
+                    }
+                } else {
+                    // Zone 3: Above T_PHYS_MAX - no heating allowed, only cooling
+
+                    // Track cells hitting physics ceiling
+                    if t_old >= constants::T_PHYS_MAX && t_old < constants::T_PHYS_MAX + 10.0 {
+                        phys_max_caps.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    dlog_t_clamped.min(0.0)
+                };
+
+                // Step 4: Apply exponential update
+                let t_new = t_old * dlog_t_final.exp();
 
                 // Hard panic on non-finite (catches numerical explosion early)
                 if !t_new.is_finite() {
                     panic!(
                         "Non-finite temperature at ({}, {}): T_old={:.2} K, \
-                         div_u={:.2} s⁻¹, exponent={:.3}, factor={}",
-                        x_u32, y_u32, t_old, div_u, exponent, factor
+                         div_u={:.2} s⁻¹, dlog_t_raw={:.6}, dlog_t_final={:.6}",
+                        x_u32, y_u32, t_old, div_u, dlog_t_raw, dlog_t_final
                     );
                 }
 
-                // Physical bounds (CMB minimum to numerical safety cap)
-                row[x].temperature = t_new.clamp(T_MIN, T_MAX);
+                // Physical bounds (CMB minimum to absolute safety cap)
+                row[x].temperature = t_new.clamp(constants::T_CMB, constants::T_MAX);
             }
         });
+
+    // Log hot-spot brake activity (helps tune constants)
+    let hot_entries = hot_zone_entries.load(Ordering::Relaxed);
+    let phys_caps = phys_max_caps.load(Ordering::Relaxed);
+
+    if hot_entries > 0 || phys_caps > 0 {
+        bevy::log::debug!(
+            hot_zone_entries = hot_entries,
+            phys_max_caps = phys_caps,
+            "Hot-spot brake activity this substep"
+        );
+    }
 }
 
 /// Compute velocity divergence at a given cell using central differences.
